@@ -89,13 +89,13 @@ Drv::I2cStatus ImuManager ::read(ImuData& imuData) {
 RawImuData ImuManager ::deserialize_raw_data(Fw::Buffer& buffer) {
     auto deserializer = buffer.getDeserializer();
     RawImuData raw;
-    deserializer.deserialize(raw.acceleration[0]);
-    deserializer.deserialize(raw.acceleration[1]);
-    deserializer.deserialize(raw.acceleration[2]);
-    deserializer.deserialize(raw.temperature);
-    deserializer.deserialize(raw.gyroscope[0]);
-    deserializer.deserialize(raw.gyroscope[1]);
-    deserializer.deserialize(raw.gyroscope[2]);
+    deserializer.deserializeTo(raw.acceleration[0]);
+    deserializer.deserializeTo(raw.acceleration[1]);
+    deserializer.deserializeTo(raw.acceleration[2]);
+    deserializer.deserializeTo(raw.temperature);
+    deserializer.deserializeTo(raw.gyroscope[0]);
+    deserializer.deserializeTo(raw.gyroscope[1]);
+    deserializer.deserializeTo(raw.gyroscope[2]);
     return raw;
 }
 
