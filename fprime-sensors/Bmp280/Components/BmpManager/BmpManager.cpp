@@ -312,12 +312,12 @@ BmpManager::RawBmpData BmpManager ::deserialize_raw_data(Fw::Buffer& buffer) {
     U8 pressure_msb, pressure_lsb, pressure_xlsb;
     U8 temperature_msb, temperature_lsb, temperature_xlsb;
 
-    deserializer.deserialize(pressure_msb);
-    deserializer.deserialize(pressure_lsb);
-    deserializer.deserialize(pressure_xlsb);
-    deserializer.deserialize(temperature_msb);
-    deserializer.deserialize(temperature_lsb);
-    deserializer.deserialize(temperature_xlsb);
+    deserializer.deserializeTo(pressure_msb);
+    deserializer.deserializeTo(pressure_lsb);
+    deserializer.deserializeTo(pressure_xlsb);
+    deserializer.deserializeTo(temperature_msb);
+    deserializer.deserializeTo(temperature_lsb);
+    deserializer.deserializeTo(temperature_xlsb);
 
     raw.pressure = (static_cast<U32>(pressure_msb) << 12) | (static_cast<U32>(pressure_lsb) << 4) |
                    (static_cast<U32>(pressure_xlsb) >> 4);
