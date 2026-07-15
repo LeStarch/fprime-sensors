@@ -8,6 +8,9 @@ module MpuImu {
         @ Port for I2C bus communication
         output port busWrite: Drv.I2c
 
+        @ Port for transmitting IMU sensor data
+        output port imuDataPush: MpuImu.ImuDataOut
+
         @ Scheduling port for reading from IMU and writing to telemetry
         sync input port run: Svc.Sched
 

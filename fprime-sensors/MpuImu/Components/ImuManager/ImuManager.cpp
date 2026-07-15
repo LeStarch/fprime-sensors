@@ -131,6 +131,9 @@ void ImuManager ::MpuImu_ImuStateMachine_action_doRead(SmId smId, MpuImu_ImuStat
         this->imuStateMachine_sendSignal_error();
     } else {
         this->tlmWrite_Reading(imuData);
+        if (this->isConnected_imuDataPush_OutputPort(0)) {
+            this->imuDataPush_out(0, imuData);
+        }
     }
 }
 
