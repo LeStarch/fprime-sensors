@@ -14,8 +14,10 @@ namespace Rfm69 {
 
 class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
   public:
-    // Maximum size of histories storing events, telemetry, and port outputs
-    static const U32 MAX_HISTORY_SIZE = 100;
+    // Maximum size of histories storing events, telemetry, and port outputs.
+    // Streamed 255-byte packets are drained through many small SPI
+    // transactions, each of which lands in the port history.
+    static const U32 MAX_HISTORY_SIZE = 10000;
 
     // Instance ID supplied to the component instance under test
     static const FwEnumStoreType TEST_INSTANCE_ID = 0;
@@ -48,6 +50,15 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
 
     //! Frame segmentation into multiple packets (REQ-004)
     void test_transmit_segmentation();
+
+    //! Maximum-size (255-byte) packet streamed through the FIFO (REQ-004)
+    void test_transmit_large();
+
+    //! Maximum-size (255-byte) packet received through the FIFO (REQ-006)
+    void test_receive_large();
+
+    //! Listen-before-talk: transmission deferred during a reception (REQ-013)
+    void test_transmit_deferred();
 
     //! Transmission before the radio is ready (REQ-012)
     void test_transmit_not_ready();

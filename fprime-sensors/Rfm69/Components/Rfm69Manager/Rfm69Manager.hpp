@@ -6,6 +6,7 @@
 #ifndef Rfm69_Rfm69Manager_HPP
 #define Rfm69_Rfm69Manager_HPP
 
+#include "Os/Mutex.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ManagerComponentAc.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Registers.hpp"
 
@@ -21,6 +22,8 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     static constexpr U8 DEFAULT_POWER_LEVEL = 15;
     //! Bound on SPI polls awaiting PacketSent for a single packet
     static constexpr U32 TX_POLL_LIMIT = 10000;
+    //! Bound on SPI polls draining one received packet from the FIFO
+    static constexpr U32 RX_POLL_LIMIT = 10000;
     //! Bound on packets read out of the radio per run invocation
     static constexpr U32 RX_PACKETS_PER_TICK = 8;
 
@@ -75,6 +78,12 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Poll for and deliver received packets
     void pollReceive();
 
+    //! Transmit a deferred frame once the channel clears
+    void retryDeferredTransmit();
+
+    //! Segment and transmit a frame; returns true when all packets sent
+    bool transmitFrame(Fw::Buffer& data);
+
     // ----------------------------------------------------------------------
     // Helper functions: RFM69 register access (Rfm69Helpers.cpp)
     // ----------------------------------------------------------------------
@@ -99,6 +108,14 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     bool setMode(U8 mode  //!< Mode field value (Rfm69::Mode)
     );
 
+    //! \brief Listen-before-talk: true when a reception is in progress
+    bool channelBusy();
+
+    //! \brief Burst-write a block of payload bytes into the FIFO
+    bool writeFifo(const U8* data,  //!< Bytes to load
+                   FwSizeType size  //!< Byte count
+    );
+
     //! \brief Transmit one packet of at most MAX_PACKET_PAYLOAD bytes
     bool transmitPacket(const U8* data,  //!< Payload data
                         FwSizeType size  //!< Payload size
@@ -117,6 +134,11 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     // Member variables
     // ----------------------------------------------------------------------
 
+    //! Serializes radio access between dataIn (com queue thread) and run
+    //! (rate group thread): both drive multi-transaction SPI sequences and
+    //! share the SPI scratch buffers
+    Os::Mutex m_lock;
+
     RadioState m_state;        //!< Radio management state
     bool m_configured;         //!< configure() has been called
     U32 m_frequencyHz;         //!< Carrier frequency (Hz)
@@ -125,10 +147,16 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     U32 m_packetsTransmitted;  //!< Count of transmitted packets
     U32 m_packetsReceived;     //!< Count of received packets
     U32 m_transmitFailures;    //!< Count of failed transmissions
+    U32 m_transmitsDeferred;   //!< Count of transmissions deferred by listen-before-talk
 
-    //! Scratch buffers for SPI transactions (address byte + FIFO contents)
-    U8 m_mosi[FIFO_SIZE + 1];
-    U8 m_miso[FIFO_SIZE + 1];
+    //! Frame deferred by listen-before-talk awaiting a clear channel
+    Fw::Buffer m_deferredBuffer;
+    ComCfg::FrameContext m_deferredContext;
+    bool m_deferredValid;
+
+    //! Scratch buffers for SPI transactions (address byte + length + payload)
+    U8 m_mosi[MAX_PACKET_PAYLOAD + 2];
+    U8 m_miso[MAX_PACKET_PAYLOAD + 2];
 };
 
 }  // namespace Rfm69

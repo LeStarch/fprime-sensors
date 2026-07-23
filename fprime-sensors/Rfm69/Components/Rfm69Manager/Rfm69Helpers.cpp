@@ -66,17 +66,17 @@ bool Rfm69Manager ::configureRadio() {
         {Reg::FRF_LSB, static_cast<U8>(frf & 0xFF)},
         // RFM69HCW: PA1 on (PA0 is not connected on this module)
         {Reg::PA_LEVEL, static_cast<U8>(0x40 | (this->m_powerLevel & 0x1F))},
-        {Reg::RX_BW, 0x55},                                 // Recommended default (Table 23)
-        {Reg::DIO_MAPPING_2, 0x07},                         // CLKOUT off
-        {Reg::RSSI_THRESH, 0xE4},                           // Recommended default
-        {Reg::SYNC_CONFIG, 0x88},                           // Sync on, 2 sync bytes
-        {Reg::SYNC_VALUE_1, 0x2D},                          // Fixed first sync byte
-        {Reg::SYNC_VALUE_2, this->m_networkId},             // Network ID
-        {Reg::PACKET_CONFIG_1, 0x90},                       // Variable length, CRC on
-        {Reg::PAYLOAD_LENGTH, static_cast<U8>(FIFO_SIZE)},  // Max RX length
-        {Reg::FIFO_THRESH, 0x8F},                           // TX start on FifoNotEmpty
-        {Reg::PACKET_CONFIG_2, 0x02},                       // Auto RX restart
-        {Reg::TEST_DAGC, 0x30},                             // Recommended default
+        {Reg::RX_BW, 0x55},                                          // Recommended default (Table 23)
+        {Reg::DIO_MAPPING_2, 0x07},                                  // CLKOUT off
+        {Reg::RSSI_THRESH, 0xE4},                                    // Recommended default
+        {Reg::SYNC_CONFIG, 0x88},                                    // Sync on, 2 sync bytes
+        {Reg::SYNC_VALUE_1, 0x2D},                                   // Fixed first sync byte
+        {Reg::SYNC_VALUE_2, this->m_networkId},                      // Network ID
+        {Reg::PACKET_CONFIG_1, 0x90},                                // Variable length, CRC on
+        {Reg::PAYLOAD_LENGTH, 0xFF},                                 // Max RX length: full 255-byte packets
+        {Reg::FIFO_THRESH, static_cast<U8>(0x80 | FIFO_THRESHOLD)},  // TX start on FifoNotEmpty
+        {Reg::PACKET_CONFIG_2, 0x02},                                // Auto RX restart
+        {Reg::TEST_DAGC, 0x30},                                      // Recommended default
     };
     for (FwSizeType i = 0; i < FW_NUM_ARRAY_ELEMENTS(configuration); i++) {
         if (this->writeRegister(configuration[i].address, configuration[i].value) != Drv::SpiStatus::SPI_OK) {
@@ -109,36 +109,66 @@ bool Rfm69Manager ::setMode(U8 mode) {
     return false;
 }
 
+bool Rfm69Manager ::channelBusy() {
+    // Listen-before-talk: SyncAddressMatch indicates the radio is actively
+    // clocking in a packet (datasheet section 6, RegIrqFlags1)
+    U8 flags = 0;
+    if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
+        return false;
+    }
+    return (flags & IrqFlags1::SYNC_ADDRESS_MATCH) != 0;
+}
+
 // ----------------------------------------------------------------------
 // Packet handling
 // ----------------------------------------------------------------------
 
+bool Rfm69Manager ::writeFifo(const U8* data, FwSizeType size) {
+    FW_ASSERT(data != nullptr);
+    FW_ASSERT((size + 1) <= sizeof this->m_mosi, static_cast<FwAssertArgType>(size));
+    this->m_mosi[0] = Reg::FIFO | SPI_WRITE_FLAG;
+    (void)::memcpy(&this->m_mosi[1], data, size);
+    Fw::Buffer writeBuffer(this->m_mosi, size + 1);
+    Fw::Buffer readBuffer(this->m_miso, size + 1);
+    return this->spiWriteRead_out(0, writeBuffer, readBuffer) == Drv::SpiStatus::SPI_OK;
+}
+
 bool Rfm69Manager ::transmitPacket(const U8* data, FwSizeType size) {
     FW_ASSERT(data != nullptr);
     FW_ASSERT(size <= MAX_PACKET_PAYLOAD, static_cast<FwAssertArgType>(size));
-    // Load the FIFO while in standby: length byte then payload (variable-length mode)
+    // Load the initial FIFO fill while in standby: length byte then payload.
+    // Packets larger than the FIFO are streamed: the remainder is topped up
+    // during transmission whenever FifoLevel drops below the threshold
+    // (datasheet section 5.2.2.3)
     if (!this->setMode(Mode::STANDBY)) {
         return false;
     }
-    this->m_mosi[0] = Reg::FIFO | SPI_WRITE_FLAG;
-    this->m_mosi[1] = static_cast<U8>(size);
-    (void)::memcpy(&this->m_mosi[2], data, size);
-    Fw::Buffer writeBuffer(this->m_mosi, size + 2);
-    Fw::Buffer readBuffer(this->m_miso, size + 2);
-    if (this->spiWriteRead_out(0, writeBuffer, readBuffer) != Drv::SpiStatus::SPI_OK) {
+    if (this->writeRegister(Reg::FIFO, static_cast<U8>(size)) != Drv::SpiStatus::SPI_OK) {
         return false;
     }
-    // Transmit and await PacketSent with a bounded poll
+    FwSizeType offset = FW_MIN(size, FIFO_SIZE - 1);
+    if (!this->writeFifo(data, offset)) {
+        return false;
+    }
+    // Transmit, topping up the FIFO and awaiting PacketSent with a bounded poll
     if (!this->setMode(Mode::TX)) {
         return false;
     }
     bool sent = false;
-    for (U32 i = 0; (i < TX_POLL_LIMIT) && !sent; i++) {
+    bool spiOk = true;
+    for (U32 i = 0; (i < TX_POLL_LIMIT) && !sent && spiOk; i++) {
         U8 flags = 0;
         if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
+            spiOk = false;
             break;
         }
-        sent = (flags & IrqFlags2::PACKET_SENT) != 0;
+        if ((offset < size) && ((flags & IrqFlags2::FIFO_LEVEL) == 0)) {
+            const FwSizeType chunk = FW_MIN(size - offset, TX_TOP_UP_CHUNK);
+            spiOk = this->writeFifo(&data[offset], chunk);
+            offset += chunk;
+        } else if (offset >= size) {
+            sent = (flags & IrqFlags2::PACKET_SENT) != 0;
+        }
     }
     // Always return to receive so uplink data is not lost
     const bool rxOk = this->setMode(Mode::RX);
@@ -151,31 +181,38 @@ bool Rfm69Manager ::transmitPacket(const U8* data, FwSizeType size) {
 
 FwSizeType Rfm69Manager ::readReceivedPacket(U8* data, FwSizeType capacity) {
     FW_ASSERT(data != nullptr);
-    // Hold the radio in standby while draining the FIFO
-    if (!this->setMode(Mode::STANDBY)) {
+    // Remain in RX and drain the FIFO as the packet streams in: packets
+    // larger than the FIFO are read out while reception continues
+    // (datasheet section 5.2.2.3)
+    U8 length = 0;
+    if (this->readRegister(Reg::FIFO, length) != Drv::SpiStatus::SPI_OK) {
         return 0;
     }
-    FwSizeType size = 0;
-    U8 length = 0;
-    if (this->readRegister(Reg::FIFO, length) == Drv::SpiStatus::SPI_OK) {
-        if ((length > 0) && (static_cast<FwSizeType>(length) <= capacity) &&
-            (static_cast<FwSizeType>(length) < FIFO_SIZE)) {
-            // Burst read the payload out of the FIFO
-            (void)::memset(this->m_mosi, 0, static_cast<FwSizeType>(length) + 1);
-            this->m_mosi[0] = Reg::FIFO;
-            Fw::Buffer writeBuffer(this->m_mosi, static_cast<FwSizeType>(length) + 1);
-            Fw::Buffer readBuffer(this->m_miso, static_cast<FwSizeType>(length) + 1);
-            if (this->spiWriteRead_out(0, writeBuffer, readBuffer) == Drv::SpiStatus::SPI_OK) {
-                (void)::memcpy(data, &this->m_miso[1], length);
-                size = length;
+    if ((length == 0) || (static_cast<FwSizeType>(length) > capacity)) {
+        // Invalid length: clear the FIFO to resynchronize
+        (void)this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);
+        return 0;
+    }
+    FwSizeType received = 0;
+    for (U32 i = 0; (i < RX_POLL_LIMIT) && (received < static_cast<FwSizeType>(length)); i++) {
+        U8 flags = 0;
+        if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
+            return 0;
+        }
+        if ((flags & IrqFlags2::FIFO_NOT_EMPTY) != 0) {
+            U8 value = 0;
+            if (this->readRegister(Reg::FIFO, value) != Drv::SpiStatus::SPI_OK) {
+                return 0;
             }
-        } else {
-            // Invalid length: clear the FIFO to resynchronize
-            (void)this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);
+            data[received++] = value;
         }
     }
-    (void)this->setMode(Mode::RX);
-    return size;
+    if (received < static_cast<FwSizeType>(length)) {
+        // Reception stalled: clear the FIFO to resynchronize
+        (void)this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);
+        return 0;
+    }
+    return received;
 }
 
 void Rfm69Manager ::updateRssi() {

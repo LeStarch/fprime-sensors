@@ -58,12 +58,15 @@ namespace IrqFlags1 {
 constexpr U8 MODE_READY = 0x80;
 constexpr U8 RX_READY = 0x40;
 constexpr U8 TX_READY = 0x20;
+constexpr U8 RSSI = 0x08;                //!< RssiValue exceeded RssiThreshold
+constexpr U8 SYNC_ADDRESS_MATCH = 0x01;  //!< Sync word detected: reception in progress
 }  // namespace IrqFlags1
 
 //! RegIrqFlags2 bit masks
 namespace IrqFlags2 {
 constexpr U8 FIFO_FULL = 0x80;
 constexpr U8 FIFO_NOT_EMPTY = 0x40;
+constexpr U8 FIFO_LEVEL = 0x20;  //!< FIFO fill exceeds FifoThreshold
 constexpr U8 FIFO_OVERRUN = 0x10;
 constexpr U8 PACKET_SENT = 0x08;
 constexpr U8 PAYLOAD_READY = 0x04;
@@ -78,9 +81,15 @@ constexpr U8 SPI_ADDRESS_MASK = 0x7F;
 constexpr U8 VERSION_VALUE = 0x24;
 //! Hardware FIFO size in bytes (datasheet section 5.2.2.2)
 constexpr FwSizeType FIFO_SIZE = 66;
-//! Maximum payload bytes per variable-length packet carried by this driver
-//! (FIFO size less the length byte, held to a round 64 bytes)
-constexpr FwSizeType MAX_PACKET_PAYLOAD = 64;
+//! FIFO threshold programmed into RegFifoThresh (FifoLevel trip point)
+constexpr U8 FIFO_THRESHOLD = 0x0F;
+//! Maximum payload bytes per variable-length packet: the length byte
+//! ranges to 255; packets larger than the FIFO are streamed through it
+//! (datasheet section 5.2.2.3)
+constexpr FwSizeType MAX_PACKET_PAYLOAD = 255;
+//! Bytes safe to burst-write into the FIFO while FifoLevel reads clear
+//! (FIFO_SIZE less the threshold, with margin)
+constexpr FwSizeType TX_TOP_UP_CHUNK = 48;
 //! Frf register step size: 32 MHz crystal / 2^19 (datasheet section 4.2.4)
 constexpr U32 CRYSTAL_HZ = 32000000;
 constexpr U32 FRF_DIVISOR = 524288;  //!< 2^19

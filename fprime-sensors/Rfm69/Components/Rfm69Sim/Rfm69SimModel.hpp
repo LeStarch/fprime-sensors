@@ -5,6 +5,11 @@
 // Plain C++ class (no component dependencies) modeling the RFM69HCW
 // register file, FIFO, and packet-mode behavior visible over SPI.
 // Used by the Rfm69Sim component and by the Rfm69Manager unit tests.
+//
+// Time is modeled with a byte clock: each SPI byte exchanged advances
+// the modeled air interface by one byte time, so packets larger than
+// the FIFO stream through it as the manager polls, mirroring the real
+// radio's behavior at a bit rate comparable to the SPI clock.
 // ======================================================================
 
 #ifndef Rfm69_Rfm69SimModel_HPP
@@ -42,6 +47,9 @@ class Rfm69SimModel {
     FwSizeType retrievePacket(U8* data, FwSizeType capacity);
 
   private:
+    //! Advance the modeled air interface by a number of byte times
+    void advanceClock(FwSizeType byteTimes);
+
     //! Read a register as seen over SPI, applying side effects (FIFO pop)
     U8 readRegister(U8 address);
 
@@ -51,11 +59,17 @@ class Rfm69SimModel {
     //! Handle a mode change written to RegOpMode
     void handleModeChange(U8 mode);
 
-    //! Transmit the packet currently in the FIFO, if complete
-    void tryTransmit();
+    //! Push one byte into the FIFO
+    void fifoPush(U8 value);
 
-    //! Load the next uplink packet into the FIFO when idle in RX
-    void tryLoadReceivePacket();
+    //! Pop one byte from the front of the FIFO
+    U8 fifoPop();
+
+    //! Begin transmitting the packet whose length byte heads the FIFO
+    void startTransmit();
+
+    //! Begin delivering the next uplink packet from the air buffer
+    void startReceive();
 
     //! Current IRQ flag register values
     U8 irqFlags1() const;
@@ -63,22 +77,33 @@ class Rfm69SimModel {
 
     U8 m_registers[REGISTER_COUNT];
 
-    // FIFO modeled as a simple queue
+    // FIFO modeled as a simple queue (front at index 0)
     U8 m_fifo[FIFO_SIZE];
     FwSizeType m_fifoCount;
-    FwSizeType m_fifoReadIndex;
 
     // IRQ flag state
     bool m_packetSent;
     bool m_payloadReady;
     bool m_fifoOverrun;
 
+    // In-progress transmission: bytes drain from the FIFO by the byte clock
+    bool m_txActive;
+    FwSizeType m_txExpected;
+    FwSizeType m_txCollected;
+    U8 m_txAccum[MAX_PACKET_PAYLOAD];
+
+    // In-progress reception: bytes stream into the FIFO by the byte clock
+    bool m_rxActive;
+    FwSizeType m_rxTotal;
+    FwSizeType m_rxDelivered;
+    U8 m_rxPacket[MAX_PACKET_PAYLOAD + 1];
+
     // Buffered uplink bytes awaiting packetization
     U8 m_airBuffer[AIR_BUFFER_SIZE];
     FwSizeType m_airCount;
 
     // Queue of transmitted packet payloads awaiting retrieval
-    U8 m_txQueue[TX_QUEUE_DEPTH][MAX_PACKET_PAYLOAD + 1];
+    U8 m_txQueue[TX_QUEUE_DEPTH][MAX_PACKET_PAYLOAD];
     FwSizeType m_txSizes[TX_QUEUE_DEPTH];
     FwSizeType m_txCount;
 };
