@@ -45,6 +45,7 @@ void Rfm69Manager ::configure(U32 frequencyHz, U8 networkId, U8 powerLevel) {
 // ----------------------------------------------------------------------
 
 void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::FrameContext& context) {
+    Os::ScopeLock lock(this->m_lock);
     Fw::Success status = Fw::Success::FAILURE;
     if ((this->m_state == READY) && !this->m_deferredValid) {
         // Listen-before-talk: defer the frame while a reception is in
@@ -77,6 +78,7 @@ void Rfm69Manager ::dataReturnIn_handler(FwIndexType portNum, Fw::Buffer& data, 
 }
 
 void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
+    Os::ScopeLock lock(this->m_lock);
     if (this->m_state == READY) {
         this->pollReceive();
         this->retryDeferredTransmit();
@@ -155,12 +157,19 @@ void Rfm69Manager ::retryDeferredTransmit() {
 void Rfm69Manager ::pollReceive() {
     U8 payload[MAX_PACKET_PAYLOAD];
     for (U32 i = 0; i < RX_PACKETS_PER_TICK; i++) {
-        U8 flags = 0;
-        if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
+        U8 flags1 = 0;
+        U8 flags2 = 0;
+        if ((this->readRegister(Reg::IRQ_FLAGS_1, flags1) != Drv::SpiStatus::SPI_OK) ||
+            (this->readRegister(Reg::IRQ_FLAGS_2, flags2) != Drv::SpiStatus::SPI_OK)) {
             break;
         }
-        // A packet is available (PayloadReady) or streaming in (FifoNotEmpty)
-        if ((flags & (IrqFlags2::PAYLOAD_READY | IrqFlags2::FIFO_NOT_EMPTY)) == 0) {
+        // A packet is available (PayloadReady) or streaming in (SyncAddressMatch
+        // with FIFO content). FifoNotEmpty alone is not sufficient: it is also
+        // set while a transmission is loading the FIFO.
+        const bool payloadReady = (flags2 & IrqFlags2::PAYLOAD_READY) != 0;
+        const bool streamingIn =
+            ((flags1 & IrqFlags1::SYNC_ADDRESS_MATCH) != 0) && ((flags2 & IrqFlags2::FIFO_NOT_EMPTY) != 0);
+        if (!payloadReady && !streamingIn) {
             break;
         }
         this->updateRssi();

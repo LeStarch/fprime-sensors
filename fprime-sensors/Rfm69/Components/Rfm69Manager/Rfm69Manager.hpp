@@ -6,6 +6,7 @@
 #ifndef Rfm69_Rfm69Manager_HPP
 #define Rfm69_Rfm69Manager_HPP
 
+#include "Os/Mutex.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ManagerComponentAc.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Registers.hpp"
 
@@ -132,6 +133,11 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     // ----------------------------------------------------------------------
     // Member variables
     // ----------------------------------------------------------------------
+
+    //! Serializes radio access between dataIn (com queue thread) and run
+    //! (rate group thread): both drive multi-transaction SPI sequences and
+    //! share the SPI scratch buffers
+    Os::Mutex m_lock;
 
     RadioState m_state;        //!< Radio management state
     bool m_configured;         //!< configure() has been called
