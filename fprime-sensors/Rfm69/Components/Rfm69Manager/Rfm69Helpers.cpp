@@ -66,17 +66,17 @@ bool Rfm69Manager ::configureRadio() {
         {Reg::FRF_LSB, static_cast<U8>(frf & 0xFF)},
         // RFM69HCW: PA1 on (PA0 is not connected on this module)
         {Reg::PA_LEVEL, static_cast<U8>(0x40 | (this->m_powerLevel & 0x1F))},
-        {Reg::RX_BW, 0x55},                                 // Recommended default (Table 23)
-        {Reg::DIO_MAPPING_2, 0x07},                         // CLKOUT off
-        {Reg::RSSI_THRESH, 0xE4},                           // Recommended default
-        {Reg::SYNC_CONFIG, 0x88},                           // Sync on, 2 sync bytes
-        {Reg::SYNC_VALUE_1, 0x2D},                          // Fixed first sync byte
-        {Reg::SYNC_VALUE_2, this->m_networkId},             // Network ID
-        {Reg::PACKET_CONFIG_1, 0x90},         // Variable length, CRC on
-        {Reg::PAYLOAD_LENGTH, 0xFF},          // Max RX length: full 255-byte packets
+        {Reg::RX_BW, 0x55},                                          // Recommended default (Table 23)
+        {Reg::DIO_MAPPING_2, 0x07},                                  // CLKOUT off
+        {Reg::RSSI_THRESH, 0xE4},                                    // Recommended default
+        {Reg::SYNC_CONFIG, 0x88},                                    // Sync on, 2 sync bytes
+        {Reg::SYNC_VALUE_1, 0x2D},                                   // Fixed first sync byte
+        {Reg::SYNC_VALUE_2, this->m_networkId},                      // Network ID
+        {Reg::PACKET_CONFIG_1, 0x90},                                // Variable length, CRC on
+        {Reg::PAYLOAD_LENGTH, 0xFF},                                 // Max RX length: full 255-byte packets
         {Reg::FIFO_THRESH, static_cast<U8>(0x80 | FIFO_THRESHOLD)},  // TX start on FifoNotEmpty
-        {Reg::PACKET_CONFIG_2, 0x02},                       // Auto RX restart
-        {Reg::TEST_DAGC, 0x30},                             // Recommended default
+        {Reg::PACKET_CONFIG_2, 0x02},                                // Auto RX restart
+        {Reg::TEST_DAGC, 0x30},                                      // Recommended default
     };
     for (FwSizeType i = 0; i < FW_NUM_ARRAY_ELEMENTS(configuration); i++) {
         if (this->writeRegister(configuration[i].address, configuration[i].value) != Drv::SpiStatus::SPI_OK) {
