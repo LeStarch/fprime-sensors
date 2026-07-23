@@ -24,6 +24,10 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_packetsTransmitted(0),
       m_packetsReceived(0),
       m_transmitFailures(0),
+      m_transmitsDeferred(0),
+      m_deferredBuffer(),
+      m_deferredContext(),
+      m_deferredValid(false),
       m_mosi{},
       m_miso{} {}
 
@@ -42,24 +46,22 @@ void Rfm69Manager ::configure(U32 frequencyHz, U8 networkId, U8 powerLevel) {
 
 void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::FrameContext& context) {
     Fw::Success status = Fw::Success::FAILURE;
-    if (this->m_state == READY) {
-        // Segment the frame into radio packets; the receiving side's frame
-        // accumulator reassembles the byte stream
-        const U8* const bytes = data.getData();
-        const FwSizeType size = data.getSize();
-        bool success = true;
-        FwSizeType offset = 0;
-        do {
-            const FwSizeType chunk = FW_MIN(size - offset, MAX_PACKET_PAYLOAD);
-            success = this->transmitPacket(&bytes[offset], chunk);
-            offset += chunk;
-        } while (success && (offset < size));
-        if (success) {
+    if ((this->m_state == READY) && !this->m_deferredValid) {
+        // Listen-before-talk: defer the frame while a reception is in
+        // progress; the run handler retries once the channel clears. The
+        // buffer and com status are held until then, back-pressuring the
+        // framer's com queue.
+        if (this->channelBusy()) {
+            this->m_deferredBuffer = data;
+            this->m_deferredContext = context;
+            this->m_deferredValid = true;
+            this->m_transmitsDeferred++;
+            this->log_ACTIVITY_LO_TransmitDeferred();
+            this->tlmWrite_TransmitsDeferred(this->m_transmitsDeferred);
+            return;
+        }
+        if (this->transmitFrame(data)) {
             status = Fw::Success::SUCCESS;
-        } else {
-            this->m_transmitFailures++;
-            this->log_WARNING_HI_TransmitFailed();
-            this->tlmWrite_TransmitFailures(this->m_transmitFailures);
         }
     } else {
         this->log_WARNING_HI_RadioNotReady();
@@ -77,6 +79,7 @@ void Rfm69Manager ::dataReturnIn_handler(FwIndexType portNum, Fw::Buffer& data, 
 void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     if (this->m_state == READY) {
         this->pollReceive();
+        this->retryDeferredTransmit();
     } else {
         this->initializeRadio();
     }
@@ -114,14 +117,50 @@ void Rfm69Manager ::initializeRadio() {
     }
 }
 
+bool Rfm69Manager ::transmitFrame(Fw::Buffer& data) {
+    // Segment the frame into radio packets; the receiving side's frame
+    // accumulator reassembles the byte stream
+    const U8* const bytes = data.getData();
+    const FwSizeType size = data.getSize();
+    bool success = true;
+    FwSizeType offset = 0;
+    do {
+        const FwSizeType chunk = FW_MIN(size - offset, MAX_PACKET_PAYLOAD);
+        success = this->transmitPacket(&bytes[offset], chunk);
+        offset += chunk;
+    } while (success && (offset < size));
+    if (!success) {
+        this->m_transmitFailures++;
+        this->log_WARNING_HI_TransmitFailed();
+        this->tlmWrite_TransmitFailures(this->m_transmitFailures);
+    }
+    return success;
+}
+
+void Rfm69Manager ::retryDeferredTransmit() {
+    if (!this->m_deferredValid || this->channelBusy()) {
+        return;
+    }
+    this->m_deferredValid = false;
+    Fw::Success status = Fw::Success::FAILURE;
+    if (this->transmitFrame(this->m_deferredBuffer)) {
+        status = Fw::Success::SUCCESS;
+    }
+    this->dataReturnOut_out(0, this->m_deferredBuffer, this->m_deferredContext);
+    if (this->isConnected_comStatusOut_OutputPort(0)) {
+        this->comStatusOut_out(0, status);
+    }
+}
+
 void Rfm69Manager ::pollReceive() {
-    U8 payload[MAX_PACKET_PAYLOAD + 1];
+    U8 payload[MAX_PACKET_PAYLOAD];
     for (U32 i = 0; i < RX_PACKETS_PER_TICK; i++) {
         U8 flags = 0;
         if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
             break;
         }
-        if ((flags & IrqFlags2::PAYLOAD_READY) == 0) {
+        // A packet is available (PayloadReady) or streaming in (FifoNotEmpty)
+        if ((flags & (IrqFlags2::PAYLOAD_READY | IrqFlags2::FIFO_NOT_EMPTY)) == 0) {
             break;
         }
         this->updateRssi();

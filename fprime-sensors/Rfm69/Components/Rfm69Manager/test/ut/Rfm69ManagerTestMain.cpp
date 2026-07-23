@@ -19,6 +19,21 @@ TEST(Nominal, TransmitSegmentation) {
     tester.test_transmit_segmentation();
 }
 
+TEST(Nominal, TransmitLarge) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_large();
+}
+
+TEST(Nominal, ReceiveLarge) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_receive_large();
+}
+
+TEST(Nominal, TransmitDeferred) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_deferred();
+}
+
 TEST(Nominal, Receive) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_receive();

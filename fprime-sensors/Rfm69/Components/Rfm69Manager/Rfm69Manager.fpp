@@ -61,6 +61,9 @@ module Rfm69 {
         @ Failed to read a received packet out of the radio FIFO
         event ReceiveFailed() severity warning high format "RFM69 packet reception failed" throttle 5
 
+        @ Transmission deferred because a reception is in progress
+        event TransmitDeferred() severity activity low format "RFM69 transmission deferred: reception in progress" throttle 5
+
         # ----------------------------------------------------------------------
         # Telemetry
         # ----------------------------------------------------------------------
@@ -73,6 +76,9 @@ module Rfm69 {
 
         @ Number of failed transmissions
         telemetry TransmitFailures: U32
+
+        @ Number of transmissions deferred by listen-before-talk
+        telemetry TransmitsDeferred: U32
 
         @ RSSI of the last received packet (dBm)
         telemetry LastRssi: F32

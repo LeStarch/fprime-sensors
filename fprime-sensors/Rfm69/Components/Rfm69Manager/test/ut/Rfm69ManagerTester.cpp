@@ -124,8 +124,8 @@ void Rfm69ManagerTester ::test_transmit() {
 
 void Rfm69ManagerTester ::test_transmit_segmentation() {
     this->makeReady();
-    // 150 bytes segments into 64 + 64 + 22
-    U8 data[150];
+    // 600 bytes segments into 255 + 255 + 90
+    U8 data[600];
     for (FwSizeType i = 0; i < sizeof data; i++) {
         data[i] = static_cast<U8>(i & 0xFF);
     }
@@ -141,7 +141,7 @@ void Rfm69ManagerTester ::test_transmit_segmentation() {
     U8 reassembled[sizeof data];
     FwSizeType total = 0;
     U8 transmitted[MAX_PACKET_PAYLOAD + 1];
-    const FwSizeType expectedSizes[] = {64, 64, 22};
+    const FwSizeType expectedSizes[] = {255, 255, 90};
     for (FwSizeType i = 0; i < FW_NUM_ARRAY_ELEMENTS(expectedSizes); i++) {
         const FwSizeType size = this->m_model.retrievePacket(transmitted, sizeof transmitted);
         ASSERT_EQ(size, expectedSizes[i]);
@@ -152,6 +152,82 @@ void Rfm69ManagerTester ::test_transmit_segmentation() {
     for (FwSizeType i = 0; i < sizeof data; i++) {
         ASSERT_EQ(reassembled[i], data[i]);
     }
+}
+
+void Rfm69ManagerTester ::test_transmit_large() {
+    this->makeReady();
+    // A full 255-byte packet: larger than the 66-byte FIFO, so it must
+    // stream through with in-transmission top-ups
+    U8 data[MAX_PACKET_PAYLOAD];
+    for (FwSizeType i = 0; i < sizeof data; i++) {
+        data[i] = static_cast<U8>((i * 7) & 0xFF);
+    }
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+
+    ASSERT_from_comStatusOut_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    ASSERT_TLM_PacketsTransmitted(0, 1);
+
+    U8 transmitted[MAX_PACKET_PAYLOAD + 1];
+    const FwSizeType size = this->m_model.retrievePacket(transmitted, sizeof transmitted);
+    ASSERT_EQ(size, sizeof data);
+    for (FwSizeType i = 0; i < size; i++) {
+        ASSERT_EQ(transmitted[i], data[i]);
+    }
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
+}
+
+void Rfm69ManagerTester ::test_receive_large() {
+    this->makeReady();
+    // A full 255-byte packet must stream through the 66-byte FIFO
+    U8 data[MAX_PACKET_PAYLOAD];
+    for (FwSizeType i = 0; i < sizeof data; i++) {
+        data[i] = static_cast<U8>((i * 3) & 0xFF);
+    }
+    this->m_model.injectAirData(data, sizeof data);
+    this->invoke_to_run(0, 0);
+
+    ASSERT_from_dataOut_SIZE(1);
+    ASSERT_TLM_PacketsReceived(0, 1);
+    const Fw::Buffer& received = this->fromPortHistory_dataOut->at(0).data;
+    ASSERT_EQ(received.getSize(), sizeof data);
+    for (FwSizeType i = 0; i < received.getSize(); i++) {
+        ASSERT_EQ(received.getData()[i], data[i]);
+    }
+}
+
+void Rfm69ManagerTester ::test_transmit_deferred() {
+    this->makeReady();
+    // A reception in progress: SyncAddressMatch is asserted by the model
+    U8 uplink[40];
+    for (FwSizeType i = 0; i < sizeof uplink; i++) {
+        uplink[i] = static_cast<U8>(i);
+    }
+    this->m_model.injectAirData(uplink, sizeof uplink);
+
+    // Listen-before-talk defers the transmission: no status, no buffer return
+    U8 data[32] = {0xA5};
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_EVENTS_TransmitDeferred_SIZE(1);
+    ASSERT_TLM_TransmitsDeferred(0, 1);
+    ASSERT_from_comStatusOut_SIZE(0);
+    ASSERT_from_dataReturnOut_SIZE(0);
+    U8 transmitted[MAX_PACKET_PAYLOAD + 1];
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
+
+    // The next run tick drains the reception, then retries the transmission
+    this->invoke_to_run(0, 0);
+    ASSERT_from_dataOut_SIZE(1);
+    ASSERT_from_comStatusOut_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    ASSERT_from_dataReturnOut_SIZE(1);
+    ASSERT_TLM_PacketsTransmitted(0, 1);
+    const FwSizeType size = this->m_model.retrievePacket(transmitted, sizeof transmitted);
+    ASSERT_EQ(size, sizeof data);
 }
 
 void Rfm69ManagerTester ::test_transmit_not_ready() {
@@ -183,8 +259,8 @@ void Rfm69ManagerTester ::test_transmit_spi_failure() {
 
 void Rfm69ManagerTester ::test_receive() {
     this->makeReady();
-    // Inject 100 bytes: delivered as a 64-byte and a 36-byte packet
-    U8 data[100];
+    // Inject 300 bytes: delivered as a 255-byte and a 45-byte packet
+    U8 data[300];
     for (FwSizeType i = 0; i < sizeof data; i++) {
         data[i] = static_cast<U8>(0xFF - (i & 0xFF));
     }
@@ -196,10 +272,10 @@ void Rfm69ManagerTester ::test_receive() {
     ASSERT_TLM_LastRssi(0, -40.0f);
     const Fw::Buffer& first = this->fromPortHistory_dataOut->at(0).data;
     const Fw::Buffer& second = this->fromPortHistory_dataOut->at(1).data;
-    ASSERT_EQ(first.getSize(), 64u);
-    ASSERT_EQ(second.getSize(), 36u);
+    ASSERT_EQ(first.getSize(), 255u);
+    ASSERT_EQ(second.getSize(), 45u);
     for (FwSizeType i = 0; i < second.getSize(); i++) {
-        ASSERT_EQ(second.getData()[i], data[64 + i]);
+        ASSERT_EQ(second.getData()[i], data[255 + i]);
     }
 }
 
