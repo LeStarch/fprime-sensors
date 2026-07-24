@@ -12,6 +12,8 @@ register_fprime_module(
     SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/Rfm69Manager.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/Rfm69Helpers.cpp"
+    DEPENDS
+        Drv_Ports
 )
 
 register_fprime_ut(

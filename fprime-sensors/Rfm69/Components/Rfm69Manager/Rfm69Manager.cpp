@@ -28,6 +28,8 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_deferredBuffer(),
       m_deferredContext(),
       m_deferredValid(false),
+      m_transmitEnabled(TransmitState::ENABLED),
+      m_resetPulsed(false),
       m_mosi{},
       m_miso{} {}
 
@@ -47,7 +49,11 @@ void Rfm69Manager ::configure(U32 frequencyHz, U8 networkId, U8 powerLevel) {
 void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::FrameContext& context) {
     Os::ScopeLock lock(this->m_lock);
     Fw::Success status = Fw::Success::FAILURE;
-    if ((this->m_state == READY) && !this->m_deferredValid) {
+    if (this->m_transmitEnabled == TransmitState::DISABLED) {
+        // Commandable receive-only window: keep the radio in RX and drop the
+        // downlink frame, but report success so Com flow control keeps moving.
+        status = Fw::Success::SUCCESS;
+    } else if ((this->m_state == READY) && !this->m_deferredValid) {
         // Listen-before-talk: defer the frame while a reception is in
         // progress; the run handler retries once the channel clears. The
         // buffer and com status are held until then, back-pressuring the
@@ -97,6 +103,12 @@ void Rfm69Manager ::initializeRadio() {
         return;
     }
     if (this->m_state == DETECT) {
+        if (!this->m_resetPulsed) {
+            this->m_resetPulsed = this->pulseReset();
+            if (!this->m_resetPulsed) {
+                return;
+            }
+        }
         if (this->detectRadio()) {
             this->m_state = CONFIGURE;
         } else {
@@ -152,6 +164,38 @@ void Rfm69Manager ::retryDeferredTransmit() {
     if (this->isConnected_comStatusOut_OutputPort(0)) {
         this->comStatusOut_out(0, status);
     }
+}
+
+// ----------------------------------------------------------------------
+// Command handler implementations
+// ----------------------------------------------------------------------
+
+void Rfm69Manager ::TRANSMIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, Rfm69::TransmitState enabled) {
+    {
+        Os::ScopeLock lock(this->m_lock);
+        this->m_transmitEnabled = enabled;
+    }
+    this->tlmWrite_TransmitEnabled(enabled);
+    this->log_ACTIVITY_HI_TransmitStateChanged(enabled);
+    this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
+}
+
+bool Rfm69Manager ::pulseReset() {
+    // A reset is optional for simulation and platforms that reset externally.
+    if (!this->isConnected_resetGpio_OutputPort(0)) {
+        return true;
+    }
+    Drv::GpioStatus status = this->resetGpio_out(0, Fw::Logic::HIGH);
+    if (status == Drv::GpioStatus::OP_OK) {
+        (void)Os::Task::delay(Fw::TimeInterval(0, 10000));
+        status = this->resetGpio_out(0, Fw::Logic::LOW);
+    }
+    if (status == Drv::GpioStatus::OP_OK) {
+        (void)Os::Task::delay(Fw::TimeInterval(0, 10000));
+        return true;
+    }
+    this->log_WARNING_HI_ResetFailed(static_cast<U8>(status));
+    return false;
 }
 
 void Rfm69Manager ::pollReceive() {

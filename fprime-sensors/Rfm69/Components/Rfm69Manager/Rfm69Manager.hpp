@@ -69,6 +69,16 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     void run_handler(FwIndexType portNum, U32 context) override;
 
     // ----------------------------------------------------------------------
+    // Command handler implementations
+    // ----------------------------------------------------------------------
+
+    //! Handler for the TRANSMIT command: enable/disable downlink
+    void TRANSMIT_cmdHandler(FwOpcodeType opCode,     //!< The command opcode
+                             U32 cmdSeq,              //!< The command sequence number
+                             Rfm69::TransmitState enabled  //!< Desired transmit state
+                             ) override;
+
+    // ----------------------------------------------------------------------
     // Helper functions: radio state management (Rfm69Manager.cpp)
     // ----------------------------------------------------------------------
 
@@ -77,6 +87,9 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
 
     //! Poll for and deliver received packets
     void pollReceive();
+
+    //! Request a reset pulse from the platform GPIO driver, if connected.
+    bool pulseReset();
 
     //! Transmit a deferred frame once the channel clears
     void retryDeferredTransmit();
@@ -148,6 +161,8 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     U32 m_packetsReceived;     //!< Count of received packets
     U32 m_transmitFailures;    //!< Count of failed transmissions
     U32 m_transmitsDeferred;   //!< Count of transmissions deferred by listen-before-talk
+    TransmitState m_transmitEnabled;  //!< Whether downlink transmit is permitted
+    bool m_resetPulsed;                //!< True once a reset pulse has been issued
 
     //! Frame deferred by listen-before-talk awaiting a clear channel
     Fw::Buffer m_deferredBuffer;

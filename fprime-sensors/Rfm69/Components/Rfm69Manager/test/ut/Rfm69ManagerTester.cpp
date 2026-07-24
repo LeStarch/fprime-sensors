@@ -304,4 +304,38 @@ void Rfm69ManagerTester ::test_data_return() {
     ASSERT_from_deallocate_SIZE(1);
 }
 
+void Rfm69ManagerTester ::test_transmit_disabled() {
+    this->makeReady();
+    // Command a receive-only window
+    this->sendCmd_TRANSMIT(0, 0, Rfm69::TransmitState::DISABLED);
+    ASSERT_CMD_RESPONSE_SIZE(1);
+    ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_TRANSMIT, 0, Fw::CmdResponse::OK);
+    ASSERT_EVENTS_TransmitStateChanged_SIZE(1);
+    ASSERT_TLM_TransmitEnabled(0, Rfm69::TransmitState::DISABLED);
+    this->clearHistory();
+
+    // A downlink frame while disabled: no SPI transmit, but Com flow control
+    // still advances with SUCCESS and the buffer is returned.
+    U8 data[32];
+    for (FwSizeType i = 0; i < sizeof data; i++) {
+        data[i] = static_cast<U8>(i);
+    }
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_from_spiWriteRead_SIZE(0);
+    ASSERT_from_comStatusOut_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    ASSERT_from_dataReturnOut_SIZE(1);
+    ASSERT_TLM_PacketsTransmitted_SIZE(0);
+
+    // Re-enable transmit: the next frame is sent over SPI as normal
+    this->sendCmd_TRANSMIT(0, 1, Rfm69::TransmitState::ENABLED);
+    ASSERT_TLM_TransmitEnabled(0, Rfm69::TransmitState::ENABLED);
+    this->clearHistory();
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    ASSERT_TLM_PacketsTransmitted(0, 1);
+}
+
 }  // namespace Rfm69

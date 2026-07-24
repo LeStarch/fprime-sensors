@@ -64,6 +64,11 @@ TEST(OffNominal, ReceiveAllocationFailure) {
     tester.test_receive_allocation_failure();
 }
 
+TEST(Nominal, TransmitDisabled) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_disabled();
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

@@ -9,13 +9,16 @@ module Rfm69 {
         """
     }
 
-    @ Hardware subtopology: RFM69 manager attached to a Linux SPI driver
+    @ RFM69 subtopology. Its named hardware instances are configuration-layer
+    @ implementations; the manager communicates with them only through F' ports.
     topology Subtopology {
         instance rfm69Manager
         instance spiDriver
+        instance resetGpio
 
         connections Rfm69 {
             rfm69Manager.spiWriteRead -> spiDriver.SpiWriteRead
+            rfm69Manager.resetGpio -> resetGpio.gpioWrite
         }
     }
 

@@ -1,4 +1,14 @@
 module Rfm69 {
+    @ Controls whether the radio is allowed to leave receive mode to downlink.
+    @ Mirrors the fprime-zephyr LoRa driver's TRANSMIT command so operators can
+    @ command deterministic receive-only (uplink) windows on the half-duplex link.
+    enum TransmitState {
+        @ Downlink frames are transmitted, then the radio returns to RX
+        ENABLED
+        @ Radio stays in receive mode; downlink frames are dropped
+        DISABLED
+    }
+
     @ Communication adapter (Svc.Com interface) for an RFM69HCW radio on a SPI bus
     passive component Rfm69Manager {
 
@@ -10,6 +20,10 @@ module Rfm69 {
 
         @ SPI bus transactions with the radio
         output port spiWriteRead: Drv.SpiWriteRead
+
+        @ Reset requests are issued through a platform-provided GPIO driver.
+        @ The manager never owns GPIO hardware directly.
+        output port resetGpio: Drv.GpioWrite
 
         @ Allocation of buffers for received packets
         output port allocate: Fw.BufferGet
@@ -35,6 +49,24 @@ module Rfm69 {
 
         @ Text event port
         text event port logTextOut
+
+        @ Command registration port
+        command reg port CmdReg
+
+        @ Command receive port
+        command recv port CmdDisp
+
+        @ Command response port
+        command resp port CmdStatus
+
+        # ----------------------------------------------------------------------
+        # Commands
+        # ----------------------------------------------------------------------
+
+        @ Enable or disable transmit. When disabled the radio remains in receive
+        @ mode and downlink frames are dropped, giving a commandable receive-only
+        @ window on the half-duplex link.
+        sync command TRANSMIT(enabled: TransmitState)
 
         # ----------------------------------------------------------------------
         # Events
@@ -64,6 +96,12 @@ module Rfm69 {
         @ Transmission deferred because a reception is in progress
         event TransmitDeferred() severity activity low format "RFM69 transmission deferred: reception in progress" throttle 5
 
+        @ Platform GPIO driver rejected an RFM69 reset request
+        event ResetFailed(status: U8) severity warning high format "RFM69 reset GPIO operation failed: {}" throttle 5
+
+        @ Transmit was enabled or disabled by command
+        event TransmitStateChanged(enabled: TransmitState) severity activity high format "RFM69 transmit state set to {}"
+
         # ----------------------------------------------------------------------
         # Telemetry
         # ----------------------------------------------------------------------
@@ -82,5 +120,8 @@ module Rfm69 {
 
         @ RSSI of the last received packet (dBm)
         telemetry LastRssi: F32
+
+        @ Current transmit enable state
+        telemetry TransmitEnabled: TransmitState update on change
     }
 }

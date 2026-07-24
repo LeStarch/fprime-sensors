@@ -75,7 +75,10 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! Uplink buffer return path deallocates buffers
     void test_data_return();
 
-  private:
+    //! TRANSMIT command gives a commandable receive-only window
+    void test_transmit_disabled();
+
+    private:
     // ----------------------------------------------------------------------
     // Handlers for typed from ports
     // ----------------------------------------------------------------------
