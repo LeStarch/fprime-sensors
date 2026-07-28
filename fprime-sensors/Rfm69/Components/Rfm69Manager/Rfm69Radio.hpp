@@ -1,15 +1,16 @@
 // ======================================================================
-// \title  Rfm69Registers.hpp
-// \brief  RFM69HCW register map and bit definitions
+// \title  Rfm69Radio.hpp
+// \brief  RFM69HCW register map, modem enum maps, and fixed packet profile
 //
 // Register addresses and values from the RFM69HCW datasheet (HopeRF, V1.1),
 // Table 23 (register summary) and section 6 (register descriptions).
 // ======================================================================
 
-#ifndef Rfm69_Rfm69Registers_HPP
-#define Rfm69_Rfm69Registers_HPP
+#ifndef Rfm69_Rfm69Radio_HPP
+#define Rfm69_Rfm69Radio_HPP
 
 #include <Fw/FPrimeBasicTypes.hpp>
+#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ManagerComponentAc.hpp"
 
 namespace Rfm69 {
 
@@ -122,6 +123,105 @@ constexpr FwSizeType TX_TOP_UP_CHUNK = 48;
 constexpr U32 CRYSTAL_HZ = 32000000;
 constexpr U32 FRF_DIVISOR = 524288;  //!< 2^19
 
+//! The register values below come from the RFM69 classical modem tables.
+//! DATA_RATE, BANDWIDTH_RX, and TX_POWER are operator-selectable; the
+//! remaining modem registers live in Rfm69Manager's fixed native-packet profile.
+struct DataRateSetting {
+    U16 bitrateReg;
+    U32 bitsPerSecond;
+};
+
+struct BandwidthSetting {
+    U8 rxBw;
+    U8 afcBw;
+};
+
+struct TxPowerSetting {
+    U8 paLevel;
+    bool boost20dBm;
+};
+
+inline bool getDataRateSetting(const Rfm69DataRate& value, DataRateSetting& setting) {
+    if (value == Rfm69DataRate::BR_1200) {
+        setting = {0x682B, 1200};
+    } else if (value == Rfm69DataRate::BR_4800) {
+        setting = {0x1A0B, 4800};
+    } else if (value == Rfm69DataRate::BR_9600) {
+        setting = {0x0D05, 9600};
+    } else if (value == Rfm69DataRate::BR_19200) {
+        setting = {0x0683, 19200};
+    } else if (value == Rfm69DataRate::BR_38400) {
+        setting = {0x0341, 38400};
+    } else {
+        return false;
+    }
+    return true;
+}
+
+inline bool getBandwidthSetting(const Rfm69Bandwidth& value, BandwidthSetting& setting) {
+    if (value == Rfm69Bandwidth::BW_100_KHZ) {
+        setting = {0xEA, 0xEA};
+    } else if (value == Rfm69Bandwidth::BW_200_KHZ) {
+        setting = {0xE9, 0xE9};
+    } else if (value == Rfm69Bandwidth::BW_250_KHZ) {
+        setting = {0xE1, 0xE1};
+    } else if (value == Rfm69Bandwidth::BW_500_KHZ) {
+        setting = {0xE0, 0xE0};
+    } else {
+        return false;
+    }
+    return true;
+}
+
+inline bool getTxPowerSetting(const Rfm69TxPower& value, TxPowerSetting& setting) {
+    if (value == Rfm69TxPower::DBM_0) {
+        setting = {0x52, false};  // PA1, -18 + 18 dBm
+    } else if (value == Rfm69TxPower::DBM_5) {
+        setting = {0x57, false};
+    } else if (value == Rfm69TxPower::DBM_10) {
+        setting = {0x5C, false};
+    } else if (value == Rfm69TxPower::DBM_13) {
+        setting = {0x5F, false};
+    } else if (value == Rfm69TxPower::DBM_17) {
+        setting = {0x7F, false};  // PA1 + PA2, normal test PA settings
+    } else if (value == Rfm69TxPower::DBM_20) {
+        setting = {0x7F, true};   // PA1 + PA2, boost only while transmitting
+    } else {
+        return false;
+    }
+    return true;
+}
+
+//! These packet-handler settings are deliberately not operator parameters.
+//! DATA_RATE, BANDWIDTH_RX, and TX_POWER are the only operator-selectable
+//! radio settings; the native F´ packet contract and sync word remain invariant.
+struct PacketProfile {
+    U16 preambleBytes;
+    U8 sync[8];
+    U8 packetConfig1;
+    U8 fifoThreshold;
+    U8 packetConfig2;
+    U8 testDagc;
+};
+
+constexpr PacketProfile NATIVE_PACKET_PROFILE = {
+    4,
+    {0x2D, 0xA7, 0x5C, 0x39, 0xD1, 0x6E, 0x84, 0xF2},
+    0xD0,  // variable length, whitening, CRC, no address filter
+    0x0F,
+    0x02,  // AutoRxRestartOn
+    0x30,
+};
+
+//! Preamble + sync + length + CRC bytes are on-air in addition to payload.
+constexpr U32 PACKET_FIXED_AIR_BYTES = 4 + 8 + 1 + 2;
+
+constexpr U32 packetAirtimeUsec(FwSizeType payloadBytes, U32 bitrateBps) {
+    return static_cast<U32>(
+        ((static_cast<U64>(payloadBytes + PACKET_FIXED_AIR_BYTES) * 8U * 1000000U) + bitrateBps - 1U) /
+        bitrateBps);
+}
+
 }  // namespace Rfm69
 
-#endif  // Rfm69_Rfm69Registers_HPP
+#endif  // Rfm69_Rfm69Radio_HPP

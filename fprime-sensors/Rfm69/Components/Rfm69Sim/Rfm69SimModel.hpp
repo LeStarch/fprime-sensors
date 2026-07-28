@@ -16,7 +16,7 @@
 #define Rfm69_Rfm69SimModel_HPP
 
 #include <Fw/FPrimeBasicTypes.hpp>
-#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Registers.hpp"
+#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Radio.hpp"
 
 namespace Rfm69 {
 

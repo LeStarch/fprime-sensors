@@ -8,7 +8,8 @@ radio-layer reassembly.
 
 Radio SPI/FIFO work is implemented in `Rfm69Helpers.cpp`. F´ ports,
 parameters, commands, state, and buffer ownership are implemented in
-`Rfm69Manager.cpp`.
+`Rfm69Manager.cpp`. Register constants, modem enum maps, and the fixed
+native-packet profile live in `Rfm69Radio.hpp`.
 
 ## Design invariants
 
@@ -45,8 +46,7 @@ states. Disabling downlink never disables packet reception.
 `Rfm69DataRate`, `Rfm69Bandwidth`, and `Rfm69TxPower` are the only modem
 values that an operator can change through FPP. `Rfm69Mode` remains valuable
 as diagnostic context, but it does not select radio settings. The
-enum-to-register maps for the three parameters are in
-[modem-params.md](modem-params.md).
+enum-to-register maps for the three parameters are in `Rfm69Radio.hpp`.
 
 ## Fixed interoperable radio profile
 
@@ -79,8 +79,8 @@ default `BR_9600`, `BW_500_KHZ`, and `DBM_13` image above. Changing flight
 `DATA_RATE` or `BANDWIDTH_RX` requires rebuilding and reflashing the Feather
 with the matching register image. Changing flight `TX_POWER` changes the Pi
 transmitter only; reflash the Feather too only when matching Feather transmit
-power is required. See [modem-profile-9600.md](modem-profile-9600.md) for the
-complete default image.
+power is required. The complete default image is the fixed profile table above
+plus `BR_9600` / `BW_500_KHZ` / `DBM_13`.
 
 ## Packet and GDS contract
 

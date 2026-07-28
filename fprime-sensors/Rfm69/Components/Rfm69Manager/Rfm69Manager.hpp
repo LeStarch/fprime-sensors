@@ -8,9 +8,7 @@
 
 #include "Os/Mutex.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ManagerComponentAc.hpp"
-#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ModemMaps.hpp"
-#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69PacketProfile.hpp"
-#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Registers.hpp"
+#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Radio.hpp"
 
 namespace Rfm69 {
 
