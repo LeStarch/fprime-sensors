@@ -17,7 +17,8 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     // Maximum size of histories storing events, telemetry, and port outputs.
     // Streamed 255-byte packets are drained through many small SPI
     // transactions, each of which lands in the port history.
-    static const U32 MAX_HISTORY_SIZE = 10000;
+    //! Large enough for a full TX_POLL_LIMIT stall plus configure / setup SPI
+    static const U32 MAX_HISTORY_SIZE = 20000;
 
     // Instance ID supplied to the component instance under test
     static const FwEnumStoreType TEST_INSTANCE_ID = 0;

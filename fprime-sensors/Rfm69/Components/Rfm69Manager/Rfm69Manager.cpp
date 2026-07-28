@@ -10,18 +10,6 @@
 
 namespace Rfm69 {
 
-namespace {
-
-bool parameterValueIsUsable(Fw::ParamValid valid) {
-    return (valid == Fw::ParamValid::VALID) || (valid == Fw::ParamValid::DEFAULT);
-}
-
-}  // namespace
-
-// C++14 requires storage for these class constants when chrono binds them.
-constexpr U32 Rfm69Manager::MODE_READY_TIMEOUT_USEC;
-constexpr U32 Rfm69Manager::PACKET_DEADLINE_MARGIN_USEC;
-
 // ----------------------------------------------------------------------
 // Construction, initialization, and destruction
 // ----------------------------------------------------------------------
@@ -30,9 +18,6 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
     : Rfm69ManagerComponentBase(compName),
       m_state(DETECT),
       m_configured(false),
-      m_dataRate(Rfm69DataRate::BR_9600),
-      m_bandwidthRx(Rfm69Bandwidth::BW_500_KHZ),
-      m_txPower(Rfm69TxPower::DBM_13),
       m_packetsTransmitted(0),
       m_packetsReceived(0),
       m_transmitEnabled(TransmitState::ENABLED),
@@ -43,66 +28,19 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
 
 Rfm69Manager ::~Rfm69Manager() {}
 
-void Rfm69Manager ::applyParameters() {
-    Fw::ParamValid valid = Fw::ParamValid::INVALID;
-    const Rfm69DataRate dataRate = this->paramGet_DATA_RATE(valid);
-    if (parameterValueIsUsable(valid)) {
-        this->m_dataRate = dataRate;
-    }
-    const Rfm69Bandwidth bandwidthRx = this->paramGet_BANDWIDTH_RX(valid);
-    if (parameterValueIsUsable(valid)) {
-        this->m_bandwidthRx = bandwidthRx;
-    }
-    const Rfm69TxPower txPower = this->paramGet_TX_POWER(valid);
-    if (parameterValueIsUsable(valid)) {
-        this->m_txPower = txPower;
-    }
-    this->m_configured = true;
-}
-
-void Rfm69Manager ::requestReconfigure() {
-    if (this->m_state == DETECT) {
-        return;
-    }
-    this->m_state = CONFIGURE;
-}
-
 void Rfm69Manager ::parameterUpdated(FwPrmIdType id) {
+    // F´ already stored the new value; defer register rewrite to the next run
+    // tick (LoRa re-reads params on each enableTx/enableRx instead).
+    (void)id;
     Os::ScopeLock lock(this->m_lock);
-    Fw::ParamValid valid = Fw::ParamValid::INVALID;
-    switch (id) {
-        case PARAMID_DATA_RATE: {
-            const Rfm69DataRate dataRate = this->paramGet_DATA_RATE(valid);
-            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
-            this->m_dataRate = dataRate;
-            break;
-        }
-        case PARAMID_BANDWIDTH_RX: {
-            const Rfm69Bandwidth bandwidthRx = this->paramGet_BANDWIDTH_RX(valid);
-            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
-            this->m_bandwidthRx = bandwidthRx;
-            break;
-        }
-        case PARAMID_TX_POWER: {
-            const Rfm69TxPower txPower = this->paramGet_TX_POWER(valid);
-            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
-            this->m_txPower = txPower;
-            break;
-        }
-        default:
-            FW_ASSERT(0, static_cast<FwAssertArgType>(id));
-            break;
+    if (this->m_state != DETECT) {
+        this->m_state = CONFIGURE;
     }
-    this->m_configured = true;
-    this->requestReconfigure();
 }
 
 void Rfm69Manager ::parametersLoaded() {
-    // The topology invokes loadParameters() before starting rate groups. This
-    // is the deployment's single source of radio configuration.
     Os::ScopeLock lock(this->m_lock);
-    this->applyParameters();
-    this->requestReconfigure();
+    this->m_configured = true;
 }
 
 // ----------------------------------------------------------------------

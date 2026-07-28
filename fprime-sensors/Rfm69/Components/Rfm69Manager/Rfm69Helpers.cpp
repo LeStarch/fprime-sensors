@@ -9,26 +9,7 @@
 
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Manager.hpp"
 
-#include <chrono>
-
 namespace Rfm69 {
-
-namespace {
-
-using MonotonicClock = std::chrono::steady_clock;
-
-bool deadlineExpired(const MonotonicClock::time_point& deadline) {
-    return MonotonicClock::now() >= deadline;
-}
-
-void waitForRadioProgress() {
-    // Leave room for the radio and the SPI controller to advance between
-    // status reads.  This avoids a CPU-bound spin while still servicing the
-    // 15-byte FIFO threshold comfortably at the supported bit rates.
-    (void)Os::Task::delay(Fw::TimeInterval(0, 500));
-}
-
-}  // namespace
 
 // ----------------------------------------------------------------------
 // Register access primitives
@@ -65,14 +46,24 @@ bool Rfm69Manager ::detectRadio() {
 }
 
 bool Rfm69Manager ::configureRadio() {
-    // Operator params: DATA_RATE, BANDWIDTH_RX, TX_POWER. All other modem
-    // registers come from NATIVE_PACKET_PROFILE (must match the ground-station image).
+    // Read operator params at configure time (same pattern as LoRa enableRx/Tx).
+    // All other modem registers come from NATIVE_PACKET_PROFILE.
+    Fw::ParamValid isValid = Fw::ParamValid::INVALID;
+    const Rfm69DataRate dataRateParam = this->paramGet_DATA_RATE(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
+    const Rfm69Bandwidth bandwidthParam = this->paramGet_BANDWIDTH_RX(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
+    const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
+
     DataRateSetting dataRate{};
     BandwidthSetting bandwidth{};
     TxPowerSetting power{};
-    if (!getDataRateSetting(this->m_dataRate, dataRate) ||
-        !getBandwidthSetting(this->m_bandwidthRx, bandwidth) ||
-        !getTxPowerSetting(this->m_txPower, power)) {
+    if (!getDataRateSetting(dataRateParam, dataRate) || !getBandwidthSetting(bandwidthParam, bandwidth) ||
+        !getTxPowerSetting(txPowerParam, power)) {
         return false;
     }
 
@@ -135,12 +126,8 @@ bool Rfm69Manager ::setMode(U8 mode) {
     if (this->writeRegister(Reg::OP_MODE, opMode) != Drv::SpiStatus::SPI_OK) {
         return false;
     }
-    // Mode transitions normally take microseconds. Use elapsed time rather
-    // than a CPU-dependent poll count so a stalled SPI/radio cannot block
-    // this handler indefinitely.
-    const MonotonicClock::time_point deadline =
-        MonotonicClock::now() + std::chrono::microseconds(MODE_READY_TIMEOUT_USEC);
-    while (!deadlineExpired(deadline)) {
+    // Bounded poll for ModeReady (datasheet section 6, RegIrqFlags1)
+    for (U32 i = 0; i < TX_POLL_LIMIT; i++) {
         U8 flags = 0;
         if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
             return false;
@@ -148,17 +135,8 @@ bool Rfm69Manager ::setMode(U8 mode) {
         if ((flags & IrqFlags1::MODE_READY) != 0) {
             return true;
         }
-        waitForRadioProgress();
     }
     return false;
-}
-
-U32 Rfm69Manager ::packetDeadlineUsec(FwSizeType payloadBytes) const {
-    DataRateSetting dataRate{};
-    if (!getDataRateSetting(this->m_dataRate, dataRate)) {
-        return PACKET_DEADLINE_MARGIN_USEC;
-    }
-    return packetAirtimeUsec(payloadBytes, dataRate.bitsPerSecond) + PACKET_DEADLINE_MARGIN_USEC;
 }
 
 bool Rfm69Manager ::recoverReceive() {
@@ -172,8 +150,12 @@ bool Rfm69Manager ::recoverReceive() {
 }
 
 bool Rfm69Manager ::setPowerBoost(bool enabled) {
+    Fw::ParamValid isValid = Fw::ParamValid::INVALID;
+    const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
     TxPowerSetting power{};
-    if (!getTxPowerSetting(this->m_txPower, power)) {
+    if (!getTxPowerSetting(txPowerParam, power)) {
         return false;
     }
     if (!power.boost20dBm) {
@@ -228,8 +210,12 @@ bool Rfm69Manager ::readFifo(U8* data, FwSizeType size) {
 bool Rfm69Manager ::transmitPacket(const U8* data, FwSizeType size) {
     FW_ASSERT(data != nullptr);
     FW_ASSERT(size <= MAX_PACKET_PAYLOAD, static_cast<FwAssertArgType>(size));
+    Fw::ParamValid isValid = Fw::ParamValid::INVALID;
+    const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
     TxPowerSetting power{};
-    if (!getTxPowerSetting(this->m_txPower, power)) {
+    if (!getTxPowerSetting(txPowerParam, power)) {
         return false;
     }
     // Load length + first FIFO fill in standby; stream the rest during TX
@@ -268,9 +254,7 @@ bool Rfm69Manager ::transmitPacket(const U8* data, FwSizeType size) {
     }
     bool sent = false;
     bool spiOk = true;
-    const MonotonicClock::time_point deadline =
-        MonotonicClock::now() + std::chrono::microseconds(this->packetDeadlineUsec(size));
-    while (!deadlineExpired(deadline) && !sent && spiOk) {
+    for (U32 i = 0; (i < TX_POLL_LIMIT) && !sent && spiOk; i++) {
         U8 flags = 0;
         if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
             spiOk = false;
@@ -282,9 +266,6 @@ bool Rfm69Manager ::transmitPacket(const U8* data, FwSizeType size) {
             offset += chunk;
         } else if (offset >= size) {
             sent = (flags & IrqFlags2::PACKET_SENT) != 0;
-        }
-        if (!sent && spiOk) {
-            waitForRadioProgress();
         }
     }
     // Always return to receive so uplink data is not lost. High-power boost
@@ -314,9 +295,7 @@ FwSizeType Rfm69Manager ::readReceivedPacket(U8* data, FwSizeType capacity) {
         return 0;
     }
     FwSizeType received = 0;
-    const MonotonicClock::time_point deadline =
-        MonotonicClock::now() + std::chrono::microseconds(this->packetDeadlineUsec(length));
-    while (!deadlineExpired(deadline) && (received < static_cast<FwSizeType>(length))) {
+    for (U32 i = 0; (i < RX_POLL_LIMIT) && (received < static_cast<FwSizeType>(length)); i++) {
         U8 flags = 0;
         if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
             (void)this->recoverReceive();
@@ -342,9 +321,6 @@ FwSizeType Rfm69Manager ::readReceivedPacket(U8* data, FwSizeType capacity) {
                 return 0;
             }
             received += chunk;
-        }
-        if (received < static_cast<FwSizeType>(length)) {
-            waitForRadioProgress();
         }
     }
     if (received < static_cast<FwSizeType>(length)) {

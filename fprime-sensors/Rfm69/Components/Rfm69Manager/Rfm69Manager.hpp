@@ -14,10 +14,10 @@ namespace Rfm69 {
 
 class Rfm69Manager final : public Rfm69ManagerComponentBase {
   public:
-    //! Mode transitions normally take microseconds; never wait indefinitely.
-    static constexpr U32 MODE_READY_TIMEOUT_USEC = 20000;
-    //! Allow one packet's profile-derived airtime plus host/SPI scheduling room.
-    static constexpr U32 PACKET_DEADLINE_MARGIN_USEC = 75000;
+    //! Bound on ModeReady / PacketSent status polls during transmit
+    static constexpr U32 TX_POLL_LIMIT = 10000;
+    //! Bound on FIFO drain polls during receive
+    static constexpr U32 RX_POLL_LIMIT = 10000;
     //! Bound on packets read out of the radio per run invocation
     static constexpr U32 RX_PACKETS_PER_TICK = 8;
 
@@ -75,11 +75,11 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
                           U32 cmdSeq            //!< The command sequence number
                           ) override;
 
-    //! Apply an updated parameter value and schedule radio reconfiguration
+    //! Schedule CONFIGURE on the next run tick after a parameter set
     void parameterUpdated(FwPrmIdType id  //!< The parameter ID
                           ) override;
 
-    //! Copy the loaded FPP parameter values before the rate groups start
+    //! Mark parameters loaded so initializeRadio may touch SPI
     void parametersLoaded() override;
 
     // ----------------------------------------------------------------------
@@ -88,12 +88,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
 
     //! Advance detection/configuration; returns true when READY
     void initializeRadio();
-
-    //! Request a reconfigure cycle on the next run tick (CONFIGURE or DETECT)
-    void requestReconfigure();
-
-    //! Copy the DATA_RATE, BANDWIDTH_RX, and TX_POWER FPP parameter values into members
-    void applyParameters();
 
     //! Poll for and deliver received packets
     void pollReceive();
@@ -134,9 +128,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Enable or restore the short-duration +20 dBm PA boost path.
     bool setPowerBoost(bool enabled);
 
-    //! Deadline for a packet of the supplied payload length at active DATA_RATE
-    U32 packetDeadlineUsec(FwSizeType payloadBytes) const;
-
     //! \brief True when a reception is in progress (drop TX rather than queue)
     bool channelBusy();
 
@@ -175,9 +166,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
 
     RadioState m_state;        //!< Radio management state
     bool m_configured;         //!< FPP parameters have been loaded
-    Rfm69DataRate m_dataRate;  //!< Curated FSK bit rate
-    Rfm69Bandwidth m_bandwidthRx;  //!< Curated RX/AFC bandwidth
-    Rfm69TxPower m_txPower;    //!< HCW PA configuration
     U32 m_packetsTransmitted;  //!< Count of transmitted packets
     U32 m_packetsReceived;     //!< Count of received packets
     TransmitState m_transmitEnabled;  //!< Whether downlink transmit is permitted

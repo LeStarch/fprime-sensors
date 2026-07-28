@@ -128,7 +128,6 @@ constexpr U32 FRF_DIVISOR = 524288;  //!< 2^19
 //! remaining modem registers live in Rfm69Manager's fixed native-packet profile.
 struct DataRateSetting {
     U16 bitrateReg;
-    U32 bitsPerSecond;
 };
 
 struct BandwidthSetting {
@@ -143,15 +142,15 @@ struct TxPowerSetting {
 
 inline bool getDataRateSetting(const Rfm69DataRate& value, DataRateSetting& setting) {
     if (value == Rfm69DataRate::BR_1200) {
-        setting = {0x682B, 1200};
+        setting = {0x682B};
     } else if (value == Rfm69DataRate::BR_4800) {
-        setting = {0x1A0B, 4800};
+        setting = {0x1A0B};
     } else if (value == Rfm69DataRate::BR_9600) {
-        setting = {0x0D05, 9600};
+        setting = {0x0D05};
     } else if (value == Rfm69DataRate::BR_19200) {
-        setting = {0x0683, 19200};
+        setting = {0x0683};
     } else if (value == Rfm69DataRate::BR_38400) {
-        setting = {0x0341, 38400};
+        setting = {0x0341};
     } else {
         return false;
     }
@@ -213,15 +212,6 @@ constexpr PacketProfile NATIVE_PACKET_PROFILE = {
     0x02,  // AutoRxRestartOn
     0x30,
 };
-
-//! Preamble + sync + length + CRC bytes are on-air in addition to payload.
-constexpr U32 PACKET_FIXED_AIR_BYTES = 4 + 8 + 1 + 2;
-
-constexpr U32 packetAirtimeUsec(FwSizeType payloadBytes, U32 bitrateBps) {
-    return static_cast<U32>(
-        ((static_cast<U64>(payloadBytes + PACKET_FIXED_AIR_BYTES) * 8U * 1000000U) + bitrateBps - 1U) /
-        bitrateBps);
-}
 
 }  // namespace Rfm69
 

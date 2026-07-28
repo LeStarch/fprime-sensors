@@ -34,7 +34,7 @@ FSK, 25 kHz deviation, sync `2D A7…`, `PacketConfig1=0xD0`). Maps live in
 - Lifecycle: `DETECT` → `CONFIGURE` → `READY` on `run`; params/`RESET` re-enter configure or detect.
 - Radio accepts **1–255** byte payloads; rejects 0 and >255 via `SendFailed` (no segmentation). Reference GDS/ground-station path uses **255-byte** records — see `GroundStationRadioHead/gds/README.md`.
 - Dumb half-duplex: if RX is in progress, downlink TX is dropped (`SendFailed`); no deferred queue.
-- TX/RX waits use airtime from `DATA_RATE` + 75 ms margin; failures recover to RX.
+- TX/RX waits use fixed poll limits; failures recover to RX.
 - `DBM_20` enables PA boost only during TX.
 
 ## Requirements

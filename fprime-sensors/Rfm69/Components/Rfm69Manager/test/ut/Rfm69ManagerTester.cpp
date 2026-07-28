@@ -303,9 +303,8 @@ void Rfm69ManagerTester ::test_invalid_data_rate_falls_back_to_default() {
 void Rfm69ManagerTester ::test_bandwidth_update_reconfigure() {
     this->makeReady();
 
-    // Generated FPP parameter-set commands call parameterUpdated(), which
-    // schedules reconfiguration for the next rate-group tick. No bespoke
-    // RECONFIGURE command is needed.
+    // Parameter-set commands call parameterUpdated(), which schedules
+    // CONFIGURE for the next rate-group tick (no SPI in command context).
     const Rfm69Bandwidth bandwidthRx = Rfm69Bandwidth::BW_200_KHZ;
     this->paramSet_BANDWIDTH_RX(bandwidthRx, Fw::ParamValid::VALID);
     this->paramSend_BANDWIDTH_RX(0, 0);
@@ -351,9 +350,8 @@ void Rfm69ManagerTester ::test_bandwidth_register_map() {
 void Rfm69ManagerTester ::test_parameter_update_reconfigure() {
     this->makeReady();
 
-    // The parameter set command invokes parameterUpdated(), which must defer
-    // reconfiguration to the next rate-group tick rather than touching the
-    // SPI bus in command-dispatch context.
+    // parameterUpdated() defers reconfiguration to the next rate-group tick
+    // rather than touching SPI in command-dispatch context.
     const Rfm69DataRate dataRate = Rfm69DataRate::BR_19200;
     this->paramSet_DATA_RATE(dataRate, Fw::ParamValid::VALID);
     this->paramSend_DATA_RATE(0, 0);

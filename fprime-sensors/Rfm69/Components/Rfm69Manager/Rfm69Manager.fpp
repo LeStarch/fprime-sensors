@@ -83,7 +83,7 @@ module Rfm69 {
         param set port prmSet
 
         # ----------------------------------------------------------------------
-        # LoRa-shaped operator parameter surface
+        # Parameters
         # ----------------------------------------------------------------------
 
         @ Classical FSK bit rate; default is the hardware-validated 9.6 kb/s.
@@ -129,8 +129,10 @@ module Rfm69 {
 
         @ Successful RF packet transmissions
         telemetry PacketsTransmitted: U32
+
         @ RF packets delivered on dataOut
         telemetry PacketsReceived: U32
+
         @ RSSI of last received packet (dBm)
         telemetry LastRssi: F32
     }
