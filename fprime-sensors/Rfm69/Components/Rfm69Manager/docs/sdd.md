@@ -6,24 +6,81 @@ uses variable-length packet mode, CRC, whitening, and FIFO streaming. It does
 not use RadioHead envelopes, unlimited mode, AES, radio-layer segmentation, or
 radio-layer reassembly.
 
-Radio SPI/FIFO work is implemented in `Rfm69Helpers.cpp`. F´ port, parameter,
-command, state, and buffer-ownership work is implemented in
+Radio SPI/FIFO work is implemented in `Rfm69Helpers.cpp`. F´ ports,
+parameters, commands, state, and buffer ownership are implemented in
 `Rfm69Manager.cpp`.
 
 ## Design invariants
 
-- The native RF payload is 1–255 bytes. A 255-byte packet is valid even though
-  the RFM69 FIFO holds only 66 bytes; the packet is streamed while it is sent
-  or received.
-- `RegPacketConfig1=0xD0` selects variable length, whitening, and CRC. AES and
-  unlimited mode remain disabled.
+- The native RF payload is 1–255 bytes. A 255-byte packet is valid even
+  though the RFM69 FIFO holds only 66 bytes; the packet is streamed while it
+  is sent or received.
+- `RegPacketConfig1=0xD0` selects variable length, whitening, and CRC. AES
+  and unlimited mode remain disabled.
 - The component never splits a frame greater than 255 bytes. It rejects the
   frame with `FrameTooLarge`, returns its buffer, and reports Com failure.
-- FPP parameters are the sole source of modem configuration. There is no
-  duplicate scalar setup path and no raw-register command.
-- The FPP surface deliberately follows the operational shape of the Zephyr
-  LoRa driver where RFM69 physics allow it: curated enum parameters, a
-  transmit-enable command, and an explicit configuration-failure mode.
+- The FPP configuration surface is intentionally small: data rate, receive/AFC
+  bandwidth, and transmit power are operator parameters. The rest of the
+  interoperable RF profile is a reviewed, fixed flight implementation detail.
+
+## Configuration and control surface
+
+The names follow the useful operational shape of the Zephyr LoRa driver where
+RFM69 physics permit it, but RFM69 is an FSK/GFSK radio, not a LoRa modem.
+
+| Kind | Name | Default / behavior |
+| --- | --- | --- |
+| Parameter | `DATA_RATE: Rfm69DataRate` | `BR_9600`; selects the Pi radio's `RegBitrate`. |
+| Parameter | `BANDWIDTH_RX: Rfm69Bandwidth` | `BW_500_KHZ`; selects both `RegRxBw` and `RegAfcBw`. |
+| Parameter | `TX_POWER: Rfm69TxPower` | `DBM_13`; selects the Pi PA/OCP/TestPa behavior. |
+| Command | `TRANSMIT(TransmitState)` | `ENABLED` permits downlink; `DISABLED` keeps uplink receive active and suppresses downlink. |
+| Command | `RESET` | Pulses optional RST GPIO and follows normal detect/configure flow. |
+| Diagnostic enum | `Rfm69Mode` | Identifies receive or transmit context in `ConfigurationFailed`; it is not a parameter. |
+
+`TransmitState` is a synchronous command state, not a modem parameter. It has
+only `ENABLED` and `DISABLED`; there is deliberately no `DISABLING` state. A
+successful synchronous command leaves the manager in one of those two stable
+states. Disabling downlink never disables packet reception.
+
+`Rfm69DataRate`, `Rfm69Bandwidth`, and `Rfm69TxPower` are the only modem
+values that an operator can change through FPP. `Rfm69Mode` remains valuable
+as diagnostic context, but it does not select radio settings. The
+enum-to-register maps for the three parameters are in
+[modem-params.md](modem-params.md).
+
+## Fixed interoperable radio profile
+
+Except for `DATA_RATE`, `BANDWIDTH_RX`, and `TX_POWER`, flight always applies
+this profile:
+
+| Setting | Fixed value / register image |
+| --- | --- |
+| Carrier | 915 MHz; `RegFrf=E4 C0 00` |
+| Modulation | Packet FSK with no shaping; `RegDataModul=00` |
+| Frequency deviation | 25 kHz; `RegFdev=01 9A` |
+| Receive/AFC bandwidth | `BANDWIDTH_RX`; default 500 kHz: `RegRxBw=E0`, `RegAfcBw=E0` |
+| Preamble and sync | Four-byte preamble; `RegSyncConfig=B8`; sync `2D A7 5C 39 D1 6E 84 F2` |
+| Packet handler | `PacketConfig1=D0`, `PayloadLength=FF`, `FifoThresh=8F`, `PacketConfig2=02` |
+| Receiver support | `DioMapping2=07`, `RssiThresh=E4`, `TestDagc=30` |
+| Default PA state | `TX_POWER=DBM_13`: `PaLevel=5F`, `Ocp=1A`, `TestPa1=55`, `TestPa2=70` |
+
+The selected data rate and receive/AFC bandwidth are the variable modem timing
+settings. The exposed range begins at 100 kHz to retain margin for the fixed
+25 kHz deviation at every supported rate; 500 kHz is the hardware-validated
+operational default. The default is 500 kHz, not 25 MHz: at the fixed 915 MHz
+carrier its nominal receiver passband is approximately 914.75–915.25 MHz,
+within the stated 902–928 MHz allocation. It is a receive filter, not a claim
+about occupied transmit bandwidth or regulatory approval.
+There is no parameter or raw-register command for deviation, shaping,
+frequency, or network ID.
+
+The checked-in `GroundStationRadioHead` Feather sketch is compiled for the
+default `BR_9600`, `BW_500_KHZ`, and `DBM_13` image above. Changing flight
+`DATA_RATE` or `BANDWIDTH_RX` requires rebuilding and reflashing the Feather
+with the matching register image. Changing flight `TX_POWER` changes the Pi
+transmitter only; reflash the Feather too only when matching Feather transmit
+power is required. See [modem-profile-9600.md](modem-profile-9600.md) for the
+complete default image.
 
 ## Packet and GDS contract
 
@@ -51,91 +108,28 @@ This strict USB rule belongs to the GDS/Feather bridge, not to the native
 RFM69 packet handler. It makes every radio GDS record deterministic and keeps
 the flight implementation free of piecemeal serial reconstruction.
 
-## LoRa-shaped parameter surface
+## Configuration lifecycle
 
-RFM69 is FSK/GFSK hardware, not a LoRa modem. The parameter names mirror the
-useful parts of the LoRa control surface while mapping each value to an RFM69
-register image.
+The deployment loads `DATA_RATE`, `BANDWIDTH_RX`, and `TX_POWER` before rate
+groups start. FPP rejects unknown enum serializations; the manager retains a
+valid loaded value or uses its compiled default. A generated FPP parameter-set
+command invokes `parameterUpdated()`, takes the radio out of `READY`, reapplies
+the fixed profile plus those three values on a later `run` invocation, and
+returns any held listen-before-talk frame with failure. There is no handwritten
+`RECONFIGURE` command.
 
-| LoRa-style concept | RFM69 parameter | RFM69 meaning |
-| --- | --- | --- |
-| `DATA_RATE` | `DATA_RATE: Rfm69DataRate` | Classical FSK bit rate (`RegBitrate`). |
-| Receiver bandwidth | `BANDWIDTH_RX: Rfm69Bandwidth` | FSK receive/AFC filter bandwidth (`RegRxBw`/`RegAfcBw`). |
-| Coding-rate-like air-format selection | `MODULATION_SHAPING: Rfm69ModulationShaping` | FSK/GFSK shaping in `RegDataModul`; RFM69 has no LoRa-style FEC. |
-| Transmit enable | `TRANSMIT(TransmitState)` | Allows or suppresses downlink while receive remains active. |
-| Configuration failure direction | `Rfm69Mode` | Identifies receive or transmit context in `ConfigurationFailed`. |
-| RFM69-specific FSK requirement | `FREQUENCY_DEVIATION: Rfm69Deviation` | FSK deviation (`RegFdev`). |
-| RFM69-specific PA control | `TX_POWER: Rfm69TxPower` | Validated PA/OCP/TestPa configuration. |
-| Carrier and network | `FREQUENCY_HZ`, `NETWORK_ID` | FRF synthesizer setting and sync byte two. |
-
-The full enum-to-register table is in [modem-params.md](modem-params.md).
-The default, hardware-matched image is recorded in
-[modem-profile-9600.md](modem-profile-9600.md).
-
-### Parameters and commands
-
-| Kind | Name | Default / behavior |
-| --- | --- | --- |
-| Parameter | `DATA_RATE` | `BR_9600` |
-| Parameter | `BANDWIDTH_RX` | `BW_500_KHZ` |
-| Parameter | `FREQUENCY_DEVIATION` | `FDEV_25_KHZ` |
-| Parameter | `MODULATION_SHAPING` | `FSK_NONE` |
-| Parameter | `TX_POWER` | `DBM_13` |
-| Parameter | `FREQUENCY_HZ` | `915000000` Hz |
-| Parameter | `NETWORK_ID` | `167` (`0xA7`) |
-| Command | `TRANSMIT(ENABLED \| DISABLED)` | `DISABLED` intentionally drops downlink with successful Com flow control while leaving uplink receive enabled. |
-| Command | `RECONFIGURE` | Reloads the FPP values and requests a hardware configuration cycle. |
-| Command | `RESET` | Pulses the optional RST GPIO, then uses normal detect/apply flow on the next scheduler tick. |
-
-The deployment loads parameters before rate groups start. A parameter update
-or `RECONFIGURE` takes the radio out of `READY`, rewrites its image on a later
-`run` invocation, and returns any held listen-before-talk frame with failure.
-
-## Validation and default image
-
-Before it writes modem registers, `configureRadio()` resolves every enum and
-validates both of these conditions:
-
-```text
-BitRate < 2 × RxBw
-Fdev < RxBw
-```
-
-An unknown enum value, invalid FRF, or incompatible rate/bandwidth/deviation
-combination emits `ConfigurationFailed(Rfm69Mode.Receive)`. The manager stays
-out of `READY` and does not send its initial successful Com-status handshake.
-
-The default validated tuple is:
-
-```text
-BR_9600 + BW_500_KHZ + FDEV_25_KHZ + FSK_NONE + DBM_13
-+ FREQUENCY_HZ=915000000 + NETWORK_ID=0xA7
-```
-
-It produces the following must-match register values on flight and on the
-compiled default Feather sketch:
-
-| Setting | Default register image |
-| --- | --- |
-| Carrier | `RegFrf=E4 C0 00` (915 MHz) |
-| Modem | `RegDataModul=00`, `RegBitrate=0D 05`, `RegFdev=01 9A` |
-| Receive filters | `RegRxBw=E0`, `RegAfcBw=E0` |
-| PA | `RegPaLevel=5F` (+13 dBm PA1), `RegOcp=1A`, normal TestPa values |
-| Sync | `RegSyncConfig=B8`; `2D A7 5C 39 D1 6E 84 F2` |
-| Packet handler | `PacketConfig1=D0`, `PayloadLength=FF`, `FifoThresh=8F`, `PacketConfig2=02` |
-
-If a flight modem, frequency, network, or power parameter changes, the
-Feather sketch must be rebuilt with the matching register image before use.
-The checked-in sketch deliberately represents the validated default rather
-than offering an unrelated second configuration API.
+`ConfigurationFailed(Rfm69Mode.Receive)` denotes failure to apply the
+resolved valid profile to radio hardware or to enter RX mode. It is not an
+invalid-parameter event. On that hardware failure the manager stays out of
+`READY` and does not send its initial successful Com-status handshake.
 
 ## FIFO service, timing, and PA behavior
 
-The default 255-byte packet places 270 bytes on air: four preamble bytes,
-eight sync bytes, one length byte, 255 payload bytes, and two CRC bytes. At
-9,600 bit/s this is about 225 ms. Packet TX/RX deadlines are calculated from
-the active `DATA_RATE` and payload length plus a 75 ms scheduler/SPI margin;
-they are not bounded by a count of SPI polls.
+At the default 9,600 bit/s rate, a 255-byte packet places 270 bytes on air:
+four preamble bytes, eight sync bytes, one length byte, 255 payload bytes, and
+two CRC bytes. That is about 225 ms. Packet TX/RX deadlines are calculated
+from the active `DATA_RATE` and payload length plus a 75 ms scheduler/SPI
+margin; they are not bounded by a count of SPI polls.
 
 `rfmRateGroup` is driven every 1 ms in the reference deployment, separately
 from 1 Hz housekeeping. This cadence is required to drain/refill the 66-byte
@@ -159,7 +153,7 @@ partial packet or absent `PacketSent` from wedging the half-duplex link.
 | ID | Shall statement | Verification |
 | --- | --- | --- |
 | REQ-RFM69MGR-001 | Detect an RFM69HCW by reading `RegVersion=0x24`. | Unit + HIL |
-| REQ-RFM69MGR-002 | Apply the validated LoRa-shaped FPP parameter image and reject incompatible modem combinations. | Unit + HIL |
+| REQ-RFM69MGR-002 | Apply the fixed 915 MHz FSK profile plus the three FPP-validated parameters; retain or default a valid value when FPP rejects an invalid serialization. | Unit + HIL |
 | REQ-RFM69MGR-003 | Enter `READY` and emit one initial successful Com status only after valid configuration and RX mode entry. | Unit |
 | REQ-RFM69MGR-004 | Transmit exactly one 1–255-byte native RF packet while streaming the 66-byte FIFO as needed. | Unit + HIL |
 | REQ-RFM69MGR-005 | Reject zero-length and greater-than-255-byte frames without segmentation. | Unit |
@@ -169,12 +163,12 @@ partial packet or absent `PacketSent` from wedging the half-duplex link.
 | REQ-RFM69MGR-009 | Defer at most one TX during an active reception. | Unit |
 | REQ-RFM69MGR-010 | Keep uplink enabled when `TRANSMIT DISABLED` suppresses downlink. | Unit + HIL |
 | REQ-RFM69MGR-011 | Reset and reconfigure without restarting the deployment. | Unit + HIL |
-| REQ-RFM69MGR-012 | Telemeter packet/failure/defer counts, RSSI, TX state, and active parameter values. | Unit + GDS |
+| REQ-RFM69MGR-012 | Telemeter packet/failure/defer counts, RSSI, TX state, active data rate, active receive bandwidth, and active TX power. | Unit + GDS |
 | REQ-RFM69MGR-013 | Exchange fixed 255-byte GDS radio records using the strict Feather bridge and fixed-TC framing plugin. | Plugin test + HIL |
 
 ## HIL acceptance
 
-For the default tuple, acceptance is a Pi/Feather radio session in which a
+For the default profile, acceptance is a Pi/Feather radio session in which a
 255-byte TM frame reaches radio GDS, a normal short GDS command reaches flight
 through the fixed-TC plugin, `TRANSMIT DISABLED` suppresses TM but permits that
 uplink, `RESET` restores traffic, and repeated packets produce no FIFO,

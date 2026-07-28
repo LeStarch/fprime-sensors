@@ -11,8 +11,9 @@
 namespace Rfm69 {
 
 //! These packet-handler settings are deliberately not operator parameters.
-//! The LoRa-shaped modem enums control only rate, bandwidth, deviation,
-//! shaping, and power; the native F´ packet contract remains invariant.
+//! DATA_RATE, BANDWIDTH_RX, and TX_POWER are the only operator-selectable
+//! radio settings;
+//! the native F´ packet contract and sync word remain invariant.
 struct PacketProfile {
     U16 preambleBytes;
     U8 sync[8];

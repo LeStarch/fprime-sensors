@@ -9,34 +9,14 @@ module Rfm69 {
         BR_38400 = 38400
     }
 
-    @ RFM69 FSK receive-channel filter bandwidth choices. Enum labels are
-    @ operator-facing kHz approximations; helpers map each to Table 14 bytes.
+    @ Curated RFM69 FSK receive/AFC filter bandwidth choices. The range starts
+    @ at 100 kHz to leave margin for the fixed 25 kHz deviation at all supported
+    @ bit rates; 500 kHz is the hardware-validated operational default.
     enum Rfm69Bandwidth : U16 {
-        BW_10_4_KHZ = 10
-        BW_20_8_KHZ = 21
-        BW_50_0_KHZ = 50
         BW_100_KHZ = 100
         BW_200_KHZ = 200
         BW_250_KHZ = 250
         BW_500_KHZ = 500
-    }
-
-    @ Curated FSK frequency-deviation choices in kHz.
-    enum Rfm69Deviation : U16 {
-        FDEV_5_KHZ = 5
-        FDEV_10_KHZ = 10
-        FDEV_25_KHZ = 25
-        FDEV_50_KHZ = 50
-        FDEV_100_KHZ = 100
-    }
-
-    @ RFM69's physical analogue to LoRa coding-rate selection. RFM69 has no
-    @ LoRa-style FEC; these values select RegDataModul FSK/GFSK shaping.
-    enum Rfm69ModulationShaping : U8 {
-        FSK_NONE = 0
-        GFSK_BT_1_0 = 1
-        GFSK_BT_0_5 = 2
-        GFSK_BT_0_3 = 3
     }
 
     @ Nominal RFM69HCW transmitter output power in dBm. The helper controls
@@ -57,6 +37,8 @@ module Rfm69 {
     }
 
     @ Controls whether the radio may leave receive mode to downlink.
+    @ DISABLING is intentionally omitted: this passive component completes
+    @ disable synchronously and returns to receive before command completion.
     enum TransmitState : U8 {
         ENABLED
         DISABLED
@@ -64,6 +46,7 @@ module Rfm69 {
 
     @ Communication adapter (Svc.Com interface) for an RFM69HCW radio on SPI.
     passive component Rfm69Manager {
+        @ Import the communication interface
         import Svc.Com
 
         # ----------------------------------------------------------------------
@@ -100,29 +83,19 @@ module Rfm69 {
         param set port prmSet
 
         # ----------------------------------------------------------------------
-        # LoRa-shaped, validated modem parameter surface
+        # LoRa-shaped operator parameter surface
         # ----------------------------------------------------------------------
 
         @ Classical FSK bit rate; default is the hardware-validated 9.6 kb/s.
-        param DATA_RATE: Rfm69DataRate default Rfm69DataRate.BR_9600
+        @ Explicit IDs preserve stored parameter compatibility after old
+        @ fixed-profile parameters were removed.
+        param DATA_RATE: Rfm69DataRate default Rfm69DataRate.BR_9600 id 0
 
-        @ FSK receive/AFC filter bandwidth; helpers reject an incompatible rate.
-        param BANDWIDTH_RX: Rfm69Bandwidth default Rfm69Bandwidth.BW_500_KHZ
-
-        @ FSK transmitter frequency deviation.
-        param FREQUENCY_DEVIATION: Rfm69Deviation default Rfm69Deviation.FDEV_25_KHZ
-
-        @ FSK/GFSK modulation shaping; RFM69's coding-rate analogue.
-        param MODULATION_SHAPING: Rfm69ModulationShaping default Rfm69ModulationShaping.FSK_NONE
+        @ FSK receive/AFC filter bandwidth; default matches the Feather image.
+        param BANDWIDTH_RX: Rfm69Bandwidth default Rfm69Bandwidth.BW_500_KHZ id 1
 
         @ HCW transmitter power configuration, including PA boost when needed.
-        param TX_POWER: Rfm69TxPower default Rfm69TxPower.DBM_13
-
-        @ Carrier frequency in Hz (e.g. 915000000).
-        param FREQUENCY_HZ: U32 default 915000000
-
-        @ Network ID written as the second byte of the eight-byte sync word.
-        param NETWORK_ID: U8 default 167
+        param TX_POWER: Rfm69TxPower default Rfm69TxPower.DBM_13 id 4
 
         # ----------------------------------------------------------------------
         # Commands
@@ -130,9 +103,6 @@ module Rfm69 {
 
         @ Enable or disable downlink. Disabled keeps the radio in receive mode.
         sync command TRANSMIT(enabled: TransmitState)
-
-        @ Re-apply the loaded parameters to radio hardware on the next run tick.
-        sync command RECONFIGURE
 
         @ Pulse hardware RST and then run normal detection/configuration.
         sync command RESET
@@ -166,16 +136,8 @@ module Rfm69 {
             format "RFM69 data rate set to {}"
         event BandwidthRxUpdated(bandwidth: Rfm69Bandwidth) severity activity high \
             format "RFM69 RX bandwidth set to {}"
-        event FrequencyDeviationUpdated(deviation: Rfm69Deviation) severity activity high \
-            format "RFM69 frequency deviation set to {}"
-        event ModulationShapingUpdated(shaping: Rfm69ModulationShaping) severity activity high \
-            format "RFM69 modulation shaping set to {}"
         event TxPowerUpdated(txPower: Rfm69TxPower) severity activity high \
             format "RFM69 TX power set to {}"
-        event FrequencyUpdated(frequencyHz: U32) severity activity high \
-            format "RFM69 frequency set to {} Hz"
-        event NetworkIdUpdated(networkId: U8) severity activity high \
-            format "RFM69 network ID set to {}"
 
         # ----------------------------------------------------------------------
         # Telemetry
@@ -189,10 +151,6 @@ module Rfm69 {
         telemetry TransmitEnabled: TransmitState update on change
         telemetry DataRate: Rfm69DataRate update on change
         telemetry BandwidthRx: Rfm69Bandwidth update on change
-        telemetry FrequencyDeviation: Rfm69Deviation update on change
-        telemetry ModulationShaping: Rfm69ModulationShaping update on change
         telemetry TxPower: Rfm69TxPower update on change
-        telemetry FrequencyHz: U32 update on change
-        telemetry NetworkId: U8 update on change
     }
 }

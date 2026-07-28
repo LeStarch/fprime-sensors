@@ -44,14 +44,19 @@ TEST(Nominal, HighPowerBoostRecovery) {
     tester.test_high_power_boost_recovery();
 }
 
-TEST(OffNominal, IncompatibleConfiguration) {
+TEST(OffNominal, InvalidDataRateFallsBackToDefault) {
     Rfm69::Rfm69ManagerTester tester;
-    tester.test_incompatible_configuration();
+    tester.test_invalid_data_rate_falls_back_to_default();
 }
 
-TEST(Nominal, ReconfigureRecovery) {
+TEST(Nominal, BandwidthUpdateReconfigure) {
     Rfm69::Rfm69ManagerTester tester;
-    tester.test_reconfigure_recovery();
+    tester.test_bandwidth_update_reconfigure();
+}
+
+TEST(Nominal, BandwidthRegisterMap) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_bandwidth_register_map();
 }
 
 TEST(Nominal, ParameterUpdateReconfigure) {
@@ -67,6 +72,11 @@ TEST(Nominal, ResetRecovery) {
 TEST(Nominal, TransmitDeferred) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_transmit_deferred();
+}
+
+TEST(Nominal, TransmitDeferredDisabled) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_deferred_disabled();
 }
 
 TEST(Nominal, Receive) {

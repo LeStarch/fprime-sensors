@@ -32,11 +32,7 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_configured(false),
       m_dataRate(Rfm69DataRate::BR_9600),
       m_bandwidthRx(Rfm69Bandwidth::BW_500_KHZ),
-      m_frequencyDeviation(Rfm69Deviation::FDEV_25_KHZ),
-      m_modulationShaping(Rfm69ModulationShaping::FSK_NONE),
       m_txPower(Rfm69TxPower::DBM_13),
-      m_frequencyHz(915000000),
-      m_networkId(0xA7),
       m_packetsTransmitted(0),
       m_packetsReceived(0),
       m_transmitFailures(0),
@@ -62,34 +58,14 @@ void Rfm69Manager ::applyParameters() {
     if (parameterValueIsUsable(valid)) {
         this->m_bandwidthRx = bandwidthRx;
     }
-    const Rfm69Deviation frequencyDeviation = this->paramGet_FREQUENCY_DEVIATION(valid);
-    if (parameterValueIsUsable(valid)) {
-        this->m_frequencyDeviation = frequencyDeviation;
-    }
-    const Rfm69ModulationShaping modulationShaping = this->paramGet_MODULATION_SHAPING(valid);
-    if (parameterValueIsUsable(valid)) {
-        this->m_modulationShaping = modulationShaping;
-    }
     const Rfm69TxPower txPower = this->paramGet_TX_POWER(valid);
     if (parameterValueIsUsable(valid)) {
         this->m_txPower = txPower;
     }
-    const U32 frequencyHz = this->paramGet_FREQUENCY_HZ(valid);
-    if (parameterValueIsUsable(valid)) {
-        this->m_frequencyHz = frequencyHz;
-    }
-    const U8 networkId = this->paramGet_NETWORK_ID(valid);
-    if (parameterValueIsUsable(valid)) {
-        this->m_networkId = networkId;
-    }
     this->m_configured = true;
     this->tlmWrite_DataRate(this->m_dataRate);
     this->tlmWrite_BandwidthRx(this->m_bandwidthRx);
-    this->tlmWrite_FrequencyDeviation(this->m_frequencyDeviation);
-    this->tlmWrite_ModulationShaping(this->m_modulationShaping);
     this->tlmWrite_TxPower(this->m_txPower);
-    this->tlmWrite_FrequencyHz(this->m_frequencyHz);
-    this->tlmWrite_NetworkId(this->m_networkId);
 }
 
 void Rfm69Manager ::requestReconfigure() {
@@ -122,44 +98,12 @@ void Rfm69Manager ::parameterUpdated(FwPrmIdType id) {
             this->tlmWrite_BandwidthRx(bandwidthRx);
             break;
         }
-        case PARAMID_FREQUENCY_DEVIATION: {
-            const Rfm69Deviation frequencyDeviation = this->paramGet_FREQUENCY_DEVIATION(valid);
-            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
-            this->m_frequencyDeviation = frequencyDeviation;
-            this->log_ACTIVITY_HI_FrequencyDeviationUpdated(frequencyDeviation);
-            this->tlmWrite_FrequencyDeviation(frequencyDeviation);
-            break;
-        }
-        case PARAMID_MODULATION_SHAPING: {
-            const Rfm69ModulationShaping modulationShaping = this->paramGet_MODULATION_SHAPING(valid);
-            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
-            this->m_modulationShaping = modulationShaping;
-            this->log_ACTIVITY_HI_ModulationShapingUpdated(modulationShaping);
-            this->tlmWrite_ModulationShaping(modulationShaping);
-            break;
-        }
         case PARAMID_TX_POWER: {
             const Rfm69TxPower txPower = this->paramGet_TX_POWER(valid);
             FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
             this->m_txPower = txPower;
             this->log_ACTIVITY_HI_TxPowerUpdated(txPower);
             this->tlmWrite_TxPower(txPower);
-            break;
-        }
-        case PARAMID_FREQUENCY_HZ: {
-            const U32 frequencyHz = this->paramGet_FREQUENCY_HZ(valid);
-            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
-            this->m_frequencyHz = frequencyHz;
-            this->log_ACTIVITY_HI_FrequencyUpdated(frequencyHz);
-            this->tlmWrite_FrequencyHz(frequencyHz);
-            break;
-        }
-        case PARAMID_NETWORK_ID: {
-            const U8 networkId = this->paramGet_NETWORK_ID(valid);
-            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
-            this->m_networkId = networkId;
-            this->log_ACTIVITY_HI_NetworkIdUpdated(networkId);
-            this->tlmWrite_NetworkId(networkId);
             break;
         }
         default:
@@ -310,7 +254,17 @@ void Rfm69Manager ::finishDeferredTransmit(Fw::Success status) {
 }
 
 void Rfm69Manager ::retryDeferredTransmit() {
-    if (!this->m_deferredValid || this->channelBusy()) {
+    if (!this->m_deferredValid) {
+        return;
+    }
+    // TRANSMIT(DISABLED) is a receive-only window. A frame that happened to
+    // be deferred immediately before the command must not escape later when
+    // the channel goes idle.
+    if (this->m_transmitEnabled == TransmitState::DISABLED) {
+        this->finishDeferredTransmit(Fw::Success::SUCCESS);
+        return;
+    }
+    if (this->channelBusy()) {
         return;
     }
     Fw::Buffer buffer = this->m_deferredBuffer;
@@ -336,18 +290,15 @@ void Rfm69Manager ::TRANSMIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, Rfm69::
     {
         Os::ScopeLock lock(this->m_lock);
         this->m_transmitEnabled = enabled;
+        if (enabled == TransmitState::DISABLED) {
+            // Match the behavior for a newly received disabled frame: drop
+            // the held frame without RF transmission and release Com flow
+            // control immediately.
+            this->finishDeferredTransmit(Fw::Success::SUCCESS);
+        }
     }
     this->tlmWrite_TransmitEnabled(enabled);
     this->log_ACTIVITY_HI_TransmitStateChanged(enabled);
-    this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
-}
-
-void Rfm69Manager ::RECONFIGURE_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
-    {
-        Os::ScopeLock lock(this->m_lock);
-        this->applyParameters();
-        this->requestReconfigure();
-    }
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 

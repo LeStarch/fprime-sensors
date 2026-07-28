@@ -66,11 +66,14 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! DBM_20 uses TestPa boost only for a TX and restores safe RX values
     void test_high_power_boost_recovery();
 
-    //! An incompatible DATA_RATE/BANDWIDTH_RX pair remains out of READY
-    void test_incompatible_configuration();
+    //! An invalid DATA_RATE serialization resolves to the FPP declared default
+    void test_invalid_data_rate_falls_back_to_default();
 
-    //! RECONFIGURE returns the radio to READY using loaded FPP parameters
-    void test_reconfigure_recovery();
+    //! A live BANDWIDTH_RX parameter update schedules and completes reconfiguration
+    void test_bandwidth_update_reconfigure();
+
+    //! Every exposed bandwidth enum maps to the intended paired RX/AFC registers
+    void test_bandwidth_register_map();
 
     //! A live DATA_RATE parameter update schedules and completes reconfiguration
     void test_parameter_update_reconfigure();
@@ -80,6 +83,9 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
 
     //! Listen-before-talk: transmission deferred during a reception (REQ-013)
     void test_transmit_deferred();
+
+    //! Disabling transmit cancels, rather than later transmits, a deferred frame
+    void test_transmit_deferred_disabled();
 
     //! Transmission before the radio is ready (REQ-012)
     void test_transmit_not_ready();
@@ -125,14 +131,10 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! Seed the generated parameter source with the canonical default profile
     void setDefaultParameters();
 
-    //! Seed all FPP parameters before component.loadParameters()
+    //! Seed the three FPP parameters before component.loadParameters()
     void setParameters(const Rfm69DataRate& dataRate,
                        const Rfm69Bandwidth& bandwidthRx,
-                       const Rfm69Deviation& frequencyDeviation,
-                       const Rfm69ModulationShaping& modulationShaping,
-                       const Rfm69TxPower& txPower,
-                       U32 frequencyHz,
-                       U8 networkId);
+                       const Rfm69TxPower& txPower);
 
     //! Connect ports and initialize components (autocoded helpers)
     void connectPorts();

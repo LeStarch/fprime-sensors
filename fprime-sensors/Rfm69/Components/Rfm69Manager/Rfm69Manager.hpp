@@ -23,6 +23,13 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Bound on packets read out of the radio per run invocation
     static constexpr U32 RX_PACKETS_PER_TICK = 8;
 
+    // Fixed native-packet modem profile. DATA_RATE, BANDWIDTH_RX, and TX_POWER
+    // are the only operator parameters; these values are deliberately compiled
+    // into both the flight and RadioHead ground implementations.
+    static constexpr U8 FIXED_DATA_MODUL = 0x00;        //!< Packet FSK, no shaping
+    static constexpr U16 FIXED_FDEV_REGISTER = 0x019A; //!< 25 kHz deviation
+    static constexpr U32 FIXED_FREQUENCY_HZ = 915000000U;
+
     // ----------------------------------------------------------------------
     // Component construction and destruction
     // ----------------------------------------------------------------------
@@ -65,11 +72,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
                              Rfm69::TransmitState enabled  //!< Desired transmit state
                              ) override;
 
-    //! Handler for the RECONFIGURE command: re-apply parameters to the radio
-    void RECONFIGURE_cmdHandler(FwOpcodeType opCode,  //!< The command opcode
-                                U32 cmdSeq            //!< The command sequence number
-                                ) override;
-
     //! Handler for RESET: pulse hardware RST and reinitialize the radio
     void RESET_cmdHandler(FwOpcodeType opCode,  //!< The command opcode
                           U32 cmdSeq            //!< The command sequence number
@@ -92,7 +94,7 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Request a reconfigure cycle on the next run tick (CONFIGURE or DETECT)
     void requestReconfigure();
 
-    //! Copy current LoRa-shaped FPP parameter values into members
+    //! Copy the DATA_RATE, BANDWIDTH_RX, and TX_POWER FPP parameter values into members
     void applyParameters();
 
     //! Return a deferred Com buffer and report its final status exactly once
@@ -183,11 +185,7 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     bool m_configured;         //!< FPP parameters have been loaded
     Rfm69DataRate m_dataRate;  //!< Curated FSK bit rate
     Rfm69Bandwidth m_bandwidthRx;  //!< Curated RX/AFC bandwidth
-    Rfm69Deviation m_frequencyDeviation;  //!< Curated FSK deviation
-    Rfm69ModulationShaping m_modulationShaping;  //!< FSK/GFSK shaping
     Rfm69TxPower m_txPower;    //!< HCW PA configuration
-    U32 m_frequencyHz;         //!< Carrier frequency (Hz)
-    U8 m_networkId;            //!< Network ID (sync word byte 2)
     U32 m_packetsTransmitted;  //!< Count of transmitted packets
     U32 m_packetsReceived;     //!< Count of received packets
     U32 m_transmitFailures;    //!< Count of failed transmissions
