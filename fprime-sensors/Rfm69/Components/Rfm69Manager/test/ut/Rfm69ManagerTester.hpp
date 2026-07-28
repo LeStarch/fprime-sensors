@@ -48,14 +48,35 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! Single-packet transmission (REQ-004/005/007/010)
     void test_transmit();
 
-    //! Frame segmentation into multiple packets (REQ-004)
-    void test_transmit_segmentation();
+    //! Zero-length frames are rejected: an RF packet must contain 1..255 bytes
+    void test_transmit_zero_size();
+
+    //! Frames above the native 255-byte RF payload limit are rejected
+    void test_transmit_oversize();
 
     //! Maximum-size (255-byte) packet streamed through the FIFO (REQ-004)
     void test_transmit_large();
 
     //! Maximum-size (255-byte) packet received through the FIFO (REQ-006)
     void test_receive_large();
+
+    //! Default enum values program the canonical flight/ground register image
+    void test_default_register_image();
+
+    //! DBM_20 uses TestPa boost only for a TX and restores safe RX values
+    void test_high_power_boost_recovery();
+
+    //! An incompatible DATA_RATE/BANDWIDTH_RX pair remains out of READY
+    void test_incompatible_configuration();
+
+    //! RECONFIGURE returns the radio to READY using loaded FPP parameters
+    void test_reconfigure_recovery();
+
+    //! A live DATA_RATE parameter update schedules and completes reconfiguration
+    void test_parameter_update_reconfigure();
+
+    //! RESET pulses RST and returns the radio to READY without a process restart
+    void test_reset_recovery();
 
     //! Listen-before-talk: transmission deferred during a reception (REQ-013)
     void test_transmit_deferred();
@@ -65,6 +86,9 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
 
     //! Transmission with SPI failures (REQ-008)
     void test_transmit_spi_failure();
+
+    //! A missing PacketSent response times out and returns the radio to RX
+    void test_transmit_timeout_recovery();
 
     //! Packet reception and delivery (REQ-006/007/010)
     void test_receive();
@@ -97,6 +121,18 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
 
     //! Bring the component to the READY state
     void makeReady();
+
+    //! Seed the generated parameter source with the canonical default profile
+    void setDefaultParameters();
+
+    //! Seed all FPP parameters before component.loadParameters()
+    void setParameters(const Rfm69DataRate& dataRate,
+                       const Rfm69Bandwidth& bandwidthRx,
+                       const Rfm69Deviation& frequencyDeviation,
+                       const Rfm69ModulationShaping& modulationShaping,
+                       const Rfm69TxPower& txPower,
+                       U32 frequencyHz,
+                       U8 networkId);
 
     //! Connect ports and initialize components (autocoded helpers)
     void connectPorts();

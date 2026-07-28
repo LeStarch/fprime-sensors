@@ -8,22 +8,18 @@
 
 #include "Os/Mutex.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ManagerComponentAc.hpp"
+#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ModemMaps.hpp"
+#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69PacketProfile.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Registers.hpp"
 
 namespace Rfm69 {
 
 class Rfm69Manager final : public Rfm69ManagerComponentBase {
   public:
-    //! Default carrier frequency (Hz): 915 MHz ISM band
-    static constexpr U32 DEFAULT_FREQUENCY_HZ = 915000000;
-    //! Default network ID (second sync word byte)
-    static constexpr U8 DEFAULT_NETWORK_ID = 100;
-    //! Default output power level (0-31, RegPaLevel OutputPower field)
-    static constexpr U8 DEFAULT_POWER_LEVEL = 15;
-    //! Bound on SPI polls awaiting PacketSent for a single packet
-    static constexpr U32 TX_POLL_LIMIT = 10000;
-    //! Bound on SPI polls draining one received packet from the FIFO
-    static constexpr U32 RX_POLL_LIMIT = 10000;
+    //! Mode transitions normally take microseconds; never wait indefinitely.
+    static constexpr U32 MODE_READY_TIMEOUT_USEC = 20000;
+    //! Allow one packet's profile-derived airtime plus host/SPI scheduling room.
+    static constexpr U32 PACKET_DEADLINE_MARGIN_USEC = 75000;
     //! Bound on packets read out of the radio per run invocation
     static constexpr U32 RX_PACKETS_PER_TICK = 8;
 
@@ -37,15 +33,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
 
     //! Destroy Rfm69Manager object
     ~Rfm69Manager();
-
-    //! \brief Set the radio configuration; must be called before the radio is initialized
-    //!
-    //! Called during topology setup. Detection and register configuration
-    //! occur on subsequent run invocations.
-    void configure(U32 frequencyHz,  //!< Carrier frequency in Hz
-                   U8 networkId,     //!< Network ID (second sync word byte)
-                   U8 powerLevel     //!< Output power level (0-31)
-    );
 
   private:
     //! Radio management states
@@ -78,12 +65,38 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
                              Rfm69::TransmitState enabled  //!< Desired transmit state
                              ) override;
 
+    //! Handler for the RECONFIGURE command: re-apply parameters to the radio
+    void RECONFIGURE_cmdHandler(FwOpcodeType opCode,  //!< The command opcode
+                                U32 cmdSeq            //!< The command sequence number
+                                ) override;
+
+    //! Handler for RESET: pulse hardware RST and reinitialize the radio
+    void RESET_cmdHandler(FwOpcodeType opCode,  //!< The command opcode
+                          U32 cmdSeq            //!< The command sequence number
+                          ) override;
+
+    //! Apply an updated parameter value and schedule radio reconfiguration
+    void parameterUpdated(FwPrmIdType id  //!< The parameter ID
+                          ) override;
+
+    //! Copy the loaded FPP parameter values before the rate groups start
+    void parametersLoaded() override;
+
     // ----------------------------------------------------------------------
     // Helper functions: radio state management (Rfm69Manager.cpp)
     // ----------------------------------------------------------------------
 
     //! Advance detection/configuration; returns true when READY
     void initializeRadio();
+
+    //! Request a reconfigure cycle on the next run tick (CONFIGURE or DETECT)
+    void requestReconfigure();
+
+    //! Copy current LoRa-shaped FPP parameter values into members
+    void applyParameters();
+
+    //! Return a deferred Com buffer and report its final status exactly once
+    void finishDeferredTransmit(Fw::Success status);
 
     //! Poll for and deliver received packets
     void pollReceive();
@@ -94,7 +107,7 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Transmit a deferred frame once the channel clears
     void retryDeferredTransmit();
 
-    //! Segment and transmit a frame; returns true when all packets sent
+    //! Transmit exactly one native RF packet; reject zero or >255-byte frames
     bool transmitFrame(Fw::Buffer& data);
 
     // ----------------------------------------------------------------------
@@ -121,12 +134,26 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     bool setMode(U8 mode  //!< Mode field value (Rfm69::Mode)
     );
 
+    //! Clear FIFO/re-arm packet RX after a timeout or malformed packet
+    bool recoverReceive();
+
+    //! Enable or restore the short-duration +20 dBm PA boost path.
+    bool setPowerBoost(bool enabled);
+
+    //! Deadline for a packet of the supplied payload length at active DATA_RATE
+    U32 packetDeadlineUsec(FwSizeType payloadBytes) const;
+
     //! \brief Listen-before-talk: true when a reception is in progress
     bool channelBusy();
 
     //! \brief Burst-write a block of payload bytes into the FIFO
     bool writeFifo(const U8* data,  //!< Bytes to load
                    FwSizeType size  //!< Byte count
+    );
+
+    //! Burst-read bytes from the FIFO.
+    bool readFifo(U8* data,  //!< Destination bytes
+                  FwSizeType size //!< Byte count
     );
 
     //! \brief Transmit one packet of at most MAX_PACKET_PAYLOAD bytes
@@ -153,16 +180,21 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     Os::Mutex m_lock;
 
     RadioState m_state;        //!< Radio management state
-    bool m_configured;         //!< configure() has been called
+    bool m_configured;         //!< FPP parameters have been loaded
+    Rfm69DataRate m_dataRate;  //!< Curated FSK bit rate
+    Rfm69Bandwidth m_bandwidthRx;  //!< Curated RX/AFC bandwidth
+    Rfm69Deviation m_frequencyDeviation;  //!< Curated FSK deviation
+    Rfm69ModulationShaping m_modulationShaping;  //!< FSK/GFSK shaping
+    Rfm69TxPower m_txPower;    //!< HCW PA configuration
     U32 m_frequencyHz;         //!< Carrier frequency (Hz)
     U8 m_networkId;            //!< Network ID (sync word byte 2)
-    U8 m_powerLevel;           //!< Output power level (0-31)
     U32 m_packetsTransmitted;  //!< Count of transmitted packets
     U32 m_packetsReceived;     //!< Count of received packets
     U32 m_transmitFailures;    //!< Count of failed transmissions
     U32 m_transmitsDeferred;   //!< Count of transmissions deferred by listen-before-talk
     TransmitState m_transmitEnabled;  //!< Whether downlink transmit is permitted
     bool m_resetPulsed;                //!< True once a reset pulse has been issued
+    bool m_comStatusAnnounced;          //!< Initial link-ready status has been sent
 
     //! Frame deferred by listen-before-talk awaiting a clear channel
     Fw::Buffer m_deferredBuffer;

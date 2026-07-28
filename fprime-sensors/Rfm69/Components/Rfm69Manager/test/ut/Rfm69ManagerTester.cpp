@@ -52,9 +52,34 @@ Fw::Buffer Rfm69ManagerTester ::from_allocate_handler(FwIndexType portNum, FwSiz
 // Helpers
 // ----------------------------------------------------------------------
 
+void Rfm69ManagerTester ::setParameters(const Rfm69DataRate& dataRate,
+                                        const Rfm69Bandwidth& bandwidthRx,
+                                        const Rfm69Deviation& frequencyDeviation,
+                                        const Rfm69ModulationShaping& modulationShaping,
+                                        const Rfm69TxPower& txPower,
+                                        U32 frequencyHz,
+                                        U8 networkId) {
+    this->paramSet_DATA_RATE(dataRate, Fw::ParamValid::VALID);
+    this->paramSet_BANDWIDTH_RX(bandwidthRx, Fw::ParamValid::VALID);
+    this->paramSet_FREQUENCY_DEVIATION(frequencyDeviation, Fw::ParamValid::VALID);
+    this->paramSet_MODULATION_SHAPING(modulationShaping, Fw::ParamValid::VALID);
+    this->paramSet_TX_POWER(txPower, Fw::ParamValid::VALID);
+    this->paramSet_FREQUENCY_HZ(frequencyHz, Fw::ParamValid::VALID);
+    this->paramSet_NETWORK_ID(networkId, Fw::ParamValid::VALID);
+}
+
+void Rfm69ManagerTester ::setDefaultParameters() {
+    const Rfm69DataRate dataRate = Rfm69DataRate::BR_9600;
+    const Rfm69Bandwidth bandwidthRx = Rfm69Bandwidth::BW_500_KHZ;
+    const Rfm69Deviation frequencyDeviation = Rfm69Deviation::FDEV_25_KHZ;
+    const Rfm69ModulationShaping modulationShaping = Rfm69ModulationShaping::FSK_NONE;
+    const Rfm69TxPower txPower = Rfm69TxPower::DBM_13;
+    this->setParameters(dataRate, bandwidthRx, frequencyDeviation, modulationShaping, txPower, 915000000U, 0xA7);
+}
+
 void Rfm69ManagerTester ::makeReady() {
-    this->component.configure(Rfm69Manager::DEFAULT_FREQUENCY_HZ, Rfm69Manager::DEFAULT_NETWORK_ID,
-                              Rfm69Manager::DEFAULT_POWER_LEVEL);
+    this->setDefaultParameters();
+    this->component.loadParameters();
     this->invoke_to_run(0, 0);
     ASSERT_EVENTS_RadioConfigured_SIZE(1);
     this->clearHistory();
@@ -65,14 +90,14 @@ void Rfm69ManagerTester ::makeReady() {
 // ----------------------------------------------------------------------
 
 void Rfm69ManagerTester ::test_initialization() {
-    // Before configure() is called, run must not touch the radio
+    // Before FPP parameters are loaded, run must not touch the radio.
     this->invoke_to_run(0, 0);
     ASSERT_from_spiWriteRead_SIZE(0);
     ASSERT_EVENTS_SIZE(0);
 
-    // After configure(), one tick detects and configures the radio
-    this->component.configure(Rfm69Manager::DEFAULT_FREQUENCY_HZ, Rfm69Manager::DEFAULT_NETWORK_ID,
-                              Rfm69Manager::DEFAULT_POWER_LEVEL);
+    // Loading defaults is the deployment's single configuration path.
+    this->setDefaultParameters();
+    this->component.loadParameters();
     this->invoke_to_run(0, 0);
     ASSERT_EVENTS_RadioConfigured_SIZE(1);
     // Initial com status is SUCCESS (ready for the first frame)
@@ -81,8 +106,8 @@ void Rfm69ManagerTester ::test_initialization() {
 }
 
 void Rfm69ManagerTester ::test_detection_retry() {
-    this->component.configure(Rfm69Manager::DEFAULT_FREQUENCY_HZ, Rfm69Manager::DEFAULT_NETWORK_ID,
-                              Rfm69Manager::DEFAULT_POWER_LEVEL);
+    this->setDefaultParameters();
+    this->component.loadParameters();
     // SPI failure: radio not detected, no configuration attempted
     this->m_spiFail = true;
     this->invoke_to_run(0, 0);
@@ -122,36 +147,39 @@ void Rfm69ManagerTester ::test_transmit() {
     ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
 }
 
-void Rfm69ManagerTester ::test_transmit_segmentation() {
+void Rfm69ManagerTester ::test_transmit_zero_size() {
     this->makeReady();
-    // 600 bytes segments into 255 + 255 + 90
-    U8 data[600];
+    U8 data[1] = {0};
+    Fw::Buffer buffer(data, 0);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+
+    ASSERT_from_comStatusOut_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
+    ASSERT_from_dataReturnOut_SIZE(1);
+    ASSERT_EVENTS_FrameTooLarge_SIZE(1);
+    ASSERT_TLM_PacketsTransmitted_SIZE(0);
+    U8 transmitted[MAX_PACKET_PAYLOAD];
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
+}
+
+void Rfm69ManagerTester ::test_transmit_oversize() {
+    this->makeReady();
+    U8 data[MAX_PACKET_PAYLOAD + 1];
     for (FwSizeType i = 0; i < sizeof data; i++) {
-        data[i] = static_cast<U8>(i & 0xFF);
+        data[i] = static_cast<U8>(i);
     }
     Fw::Buffer buffer(data, sizeof data);
     ComCfg::FrameContext context;
     this->invoke_to_dataIn(0, buffer, context);
 
     ASSERT_from_comStatusOut_SIZE(1);
-    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
-    ASSERT_TLM_PacketsTransmitted(2, 3);
-
-    // Reassembled packets match the original frame
-    U8 reassembled[sizeof data];
-    FwSizeType total = 0;
-    U8 transmitted[MAX_PACKET_PAYLOAD + 1];
-    const FwSizeType expectedSizes[] = {255, 255, 90};
-    for (FwSizeType i = 0; i < FW_NUM_ARRAY_ELEMENTS(expectedSizes); i++) {
-        const FwSizeType size = this->m_model.retrievePacket(transmitted, sizeof transmitted);
-        ASSERT_EQ(size, expectedSizes[i]);
-        (void)::memcpy(&reassembled[total], transmitted, size);
-        total += size;
-    }
-    ASSERT_EQ(total, sizeof data);
-    for (FwSizeType i = 0; i < sizeof data; i++) {
-        ASSERT_EQ(reassembled[i], data[i]);
-    }
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
+    ASSERT_from_dataReturnOut_SIZE(1);
+    ASSERT_EVENTS_FrameTooLarge_SIZE(1);
+    ASSERT_TLM_PacketsTransmitted_SIZE(0);
+    U8 transmitted[MAX_PACKET_PAYLOAD];
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
 }
 
 void Rfm69ManagerTester ::test_transmit_large() {
@@ -196,6 +224,178 @@ void Rfm69ManagerTester ::test_receive_large() {
     for (FwSizeType i = 0; i < received.getSize(); i++) {
         ASSERT_EQ(received.getData()[i], data[i]);
     }
+    // RxRestart is a self-clearing command bit; the model must be ready to
+    // accept the next packet without carrying stale FIFO state forward.
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::PACKET_CONFIG_2), 0x02);
+}
+
+void Rfm69ManagerTester ::test_default_register_image() {
+    this->makeReady();
+    // This is the canonical default enum image mirrored by the Feather:
+    // BR_9600 / BW_500_KHZ / FDEV_25_KHZ / FSK_NONE / DBM_13.
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::DATA_MODUL), 0x00);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_MSB), 0x0D);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_LSB), 0x05);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::FDEV_MSB), 0x01);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::FDEV_LSB), 0x9A);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::RX_BW), 0xE0);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::AFC_BW), 0xE0);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::PA_LEVEL), 0x5F);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::OCP), Pa::OCP_NORMAL);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::TEST_PA_1), Pa::TEST_PA_1_NORMAL);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::TEST_PA_2), Pa::TEST_PA_2_NORMAL);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::FRF_MSB), 0xE4);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::FRF_MID), 0xC0);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::FRF_LSB), 0x00);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::SYNC_VALUE_2), 0xA7);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::PACKET_CONFIG_1), 0xD0);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::PAYLOAD_LENGTH), 0xFF);
+}
+
+void Rfm69ManagerTester ::test_high_power_boost_recovery() {
+    this->makeReady();
+
+    // Change only TX_POWER through the generated parameter command. The
+    // normal configured image keeps boost disabled until a packet is sent.
+    const Rfm69TxPower txPower = Rfm69TxPower::DBM_20;
+    this->paramSet_TX_POWER(txPower, Fw::ParamValid::VALID);
+    this->paramSend_TX_POWER(0, 0);
+    ASSERT_CMD_RESPONSE_SIZE(1);
+    ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_TX_POWER_SET, 0, Fw::CmdResponse::OK);
+    ASSERT_EVENTS_TxPowerUpdated_SIZE(1);
+    this->invoke_to_run(0, 0);
+    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::PA_LEVEL), 0x7F);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::OCP), Pa::OCP_NORMAL);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::TEST_PA_1), Pa::TEST_PA_1_NORMAL);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::TEST_PA_2), Pa::TEST_PA_2_NORMAL);
+
+    // The simulator's write history makes the short boost interval observable
+    // even though transmitPacket() restores the normal RX settings before it
+    // returns to the caller.
+    this->m_model.clearRegisterWriteHistory();
+    this->clearHistory();
+    U8 data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    ASSERT_TRUE(this->m_model.wasRegisterWritten(Reg::OCP, Pa::OCP_DISABLED));
+    ASSERT_TRUE(this->m_model.wasRegisterWritten(Reg::TEST_PA_1, Pa::TEST_PA_1_BOOST));
+    ASSERT_TRUE(this->m_model.wasRegisterWritten(Reg::TEST_PA_2, Pa::TEST_PA_2_BOOST));
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::OCP), Pa::OCP_NORMAL);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::TEST_PA_1), Pa::TEST_PA_1_NORMAL);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::TEST_PA_2), Pa::TEST_PA_2_NORMAL);
+}
+
+void Rfm69ManagerTester ::test_incompatible_configuration() {
+    const Rfm69DataRate dataRate = Rfm69DataRate::BR_38400;
+    const Rfm69Bandwidth bandwidthRx = Rfm69Bandwidth::BW_10_4_KHZ;
+    const Rfm69Deviation frequencyDeviation = Rfm69Deviation::FDEV_25_KHZ;
+    const Rfm69ModulationShaping modulationShaping = Rfm69ModulationShaping::FSK_NONE;
+    const Rfm69TxPower txPower = Rfm69TxPower::DBM_13;
+    this->setParameters(dataRate, bandwidthRx, frequencyDeviation, modulationShaping, txPower, 915000000U, 0xA7);
+    this->component.loadParameters();
+
+    // 38.4 kb/s is not less than twice a 10.4 kHz RX filter. Configuration
+    // must fail before READY instead of programming a partial modem image.
+    this->invoke_to_run(0, 0);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed(0, Rfm69Mode::Receive);
+    ASSERT_EVENTS_RadioConfigured_SIZE(0);
+    ASSERT_from_comStatusOut_SIZE(0);
+
+    U8 data[8] = {0};
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_EVENTS_RadioNotReady_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
+    ASSERT_from_dataReturnOut_SIZE(1);
+}
+
+void Rfm69ManagerTester ::test_reconfigure_recovery() {
+    this->makeReady();
+
+    this->sendCmd_RECONFIGURE(0, 0);
+    ASSERT_CMD_RESPONSE_SIZE(1);
+    ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_RECONFIGURE, 0, Fw::CmdResponse::OK);
+    ASSERT_from_spiWriteRead_SIZE(0);
+
+    // The command schedules reconfiguration; the next service tick performs
+    // it and must leave the radio in a usable receive/transmit state.
+    this->invoke_to_run(0, 0);
+    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_from_comStatusOut_SIZE(0);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::PA_LEVEL), 0x5F);
+
+    this->clearHistory();
+    U8 data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    U8 transmitted[MAX_PACKET_PAYLOAD];
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), sizeof data);
+}
+
+void Rfm69ManagerTester ::test_parameter_update_reconfigure() {
+    this->makeReady();
+
+    // The parameter set command invokes parameterUpdated(), which must defer
+    // reconfiguration to the next rate-group tick rather than touching the
+    // SPI bus in command-dispatch context.
+    const Rfm69DataRate dataRate = Rfm69DataRate::BR_19200;
+    this->paramSet_DATA_RATE(dataRate, Fw::ParamValid::VALID);
+    this->paramSend_DATA_RATE(0, 0);
+    ASSERT_CMD_RESPONSE_SIZE(1);
+    ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_DATA_RATE_SET, 0, Fw::CmdResponse::OK);
+    ASSERT_EVENTS_DataRateUpdated_SIZE(1);
+    ASSERT_from_spiWriteRead_SIZE(0);
+
+    this->invoke_to_run(0, 0);
+    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_MSB), 0x06);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_LSB), 0x83);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::RX_BW), 0xE0);
+    ASSERT_from_comStatusOut_SIZE(0);
+
+    this->clearHistory();
+    U8 data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    U8 transmitted[MAX_PACKET_PAYLOAD];
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), sizeof data);
+}
+
+void Rfm69ManagerTester ::test_reset_recovery() {
+    this->makeReady();
+
+    this->sendCmd_RESET(0, 0);
+    ASSERT_CMD_RESPONSE_SIZE(1);
+    ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_RESET, 0, Fw::CmdResponse::OK);
+    ASSERT_EVENTS_RadioReset_SIZE(1);
+    ASSERT_from_resetGpio_SIZE(2);
+    ASSERT_from_resetGpio(0, Fw::Logic::HIGH);
+    ASSERT_from_resetGpio(1, Fw::Logic::LOW);
+
+    // The normal next scheduler tick redetects and configures the model. The
+    // startup Com SUCCESS is intentionally not repeated after a reset.
+    this->invoke_to_run(0, 0);
+    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_from_comStatusOut_SIZE(0);
+
+    this->clearHistory();
+    U8 data[8] = {7, 6, 5, 4, 3, 2, 1, 0};
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    U8 transmitted[MAX_PACKET_PAYLOAD];
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), sizeof data);
 }
 
 void Rfm69ManagerTester ::test_transmit_deferred() {
@@ -257,6 +457,36 @@ void Rfm69ManagerTester ::test_transmit_spi_failure() {
     ASSERT_TLM_TransmitFailures(0, 1);
 }
 
+void Rfm69ManagerTester ::test_transmit_timeout_recovery() {
+    this->makeReady();
+    this->m_model.setPacketSentStall(true);
+    U8 data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+
+    ASSERT_EVENTS_TransmitFailed_SIZE(1);
+    ASSERT_from_comStatusOut_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
+    ASSERT_from_dataReturnOut_SIZE(1);
+    ASSERT_TLM_TransmitFailures(0, 1);
+    ASSERT_EQ(this->m_model.readRegisterValue(Reg::OP_MODE) & Mode::MASK, Mode::RX);
+    U8 transmitted[MAX_PACKET_PAYLOAD];
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
+
+    // Remove the fault and prove the same radio model can transmit again.
+    this->m_model.setPacketSentStall(false);
+    this->clearHistory();
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    ASSERT_from_dataReturnOut_SIZE(1);
+    const FwSizeType size = this->m_model.retrievePacket(transmitted, sizeof transmitted);
+    ASSERT_EQ(size, sizeof data);
+    for (FwSizeType i = 0; i < size; i++) {
+        ASSERT_EQ(transmitted[i], data[i]);
+    }
+}
+
 void Rfm69ManagerTester ::test_receive() {
     this->makeReady();
     // Inject 300 bytes: delivered as a 255-byte and a 45-byte packet
@@ -265,6 +495,11 @@ void Rfm69ManagerTester ::test_receive() {
         data[i] = static_cast<U8>(0xFF - (i & 0xFF));
     }
     this->m_model.injectAirData(data, sizeof data);
+    this->invoke_to_run(0, 0);
+
+    // RxRestart separates complete variable-length packets. A second tick is
+    // sufficient whether the implementation drains one or several packets per
+    // service invocation.
     this->invoke_to_run(0, 0);
 
     ASSERT_from_dataOut_SIZE(2);

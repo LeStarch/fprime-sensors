@@ -14,9 +14,14 @@ TEST(Nominal, Transmit) {
     tester.test_transmit();
 }
 
-TEST(Nominal, TransmitSegmentation) {
+TEST(OffNominal, TransmitZeroSize) {
     Rfm69::Rfm69ManagerTester tester;
-    tester.test_transmit_segmentation();
+    tester.test_transmit_zero_size();
+}
+
+TEST(OffNominal, TransmitOversize) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_oversize();
 }
 
 TEST(Nominal, TransmitLarge) {
@@ -27,6 +32,36 @@ TEST(Nominal, TransmitLarge) {
 TEST(Nominal, ReceiveLarge) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_receive_large();
+}
+
+TEST(Nominal, DefaultRegisterImage) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_default_register_image();
+}
+
+TEST(Nominal, HighPowerBoostRecovery) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_high_power_boost_recovery();
+}
+
+TEST(OffNominal, IncompatibleConfiguration) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_incompatible_configuration();
+}
+
+TEST(Nominal, ReconfigureRecovery) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_reconfigure_recovery();
+}
+
+TEST(Nominal, ParameterUpdateReconfigure) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_parameter_update_reconfigure();
+}
+
+TEST(Nominal, ResetRecovery) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_reset_recovery();
 }
 
 TEST(Nominal, TransmitDeferred) {
@@ -57,6 +92,11 @@ TEST(OffNominal, TransmitNotReady) {
 TEST(OffNominal, TransmitSpiFailure) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_transmit_spi_failure();
+}
+
+TEST(OffNominal, TransmitTimeoutRecovery) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_timeout_recovery();
 }
 
 TEST(OffNominal, ReceiveAllocationFailure) {

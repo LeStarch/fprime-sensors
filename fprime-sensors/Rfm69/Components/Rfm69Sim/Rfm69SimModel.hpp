@@ -30,6 +30,8 @@ class Rfm69SimModel {
     static constexpr FwSizeType TX_QUEUE_DEPTH = 8;
     //! Fixed RSSI register readback (-value/2 dBm => -40 dBm)
     static constexpr U8 RSSI_READBACK = 0x50;
+    //! Bound on non-FIFO register writes retained for white-box assertions
+    static constexpr FwSizeType REGISTER_WRITE_HISTORY_SIZE = 64;
 
     Rfm69SimModel();
 
@@ -45,6 +47,23 @@ class Rfm69SimModel {
     //! Retrieve the next transmitted packet payload (downlink).
     //! \return payload size, or 0 when no packet is pending
     FwSizeType retrievePacket(U8* data, FwSizeType capacity);
+
+    //! Return a register value for white-box unit-test assertions. Dynamic IRQ
+    //! registers are synthesized by the model and are therefore intentionally
+    //! not exposed through this helper.
+    U8 readRegisterValue(U8 address) const;
+
+    //! Suppress PacketSent completion for an in-flight TX packet. This lets
+    //! tests exercise the manager's bounded TX wait and RX recovery path.
+    void setPacketSentStall(bool stall);
+
+    //! Clear the bounded non-FIFO register-write history.
+    void clearRegisterWriteHistory();
+
+    //! Return whether a non-FIFO register write occurred since the history
+    //! was last cleared. This exposes transient radio controls such as the
+    //! DBM_20 TestPa boost without changing the simulation's functional API.
+    bool wasRegisterWritten(U8 address, U8 value) const;
 
   private:
     //! Advance the modeled air interface by a number of byte times
@@ -77,6 +96,12 @@ class Rfm69SimModel {
 
     U8 m_registers[REGISTER_COUNT];
 
+    // Bounded non-FIFO write history for unit-test observation of transient
+    // register values. FIFO data is intentionally excluded.
+    U8 m_registerWriteAddresses[REGISTER_WRITE_HISTORY_SIZE];
+    U8 m_registerWriteValues[REGISTER_WRITE_HISTORY_SIZE];
+    FwSizeType m_registerWriteCount;
+
     // FIFO modeled as a simple queue (front at index 0)
     U8 m_fifo[FIFO_SIZE];
     FwSizeType m_fifoCount;
@@ -85,6 +110,9 @@ class Rfm69SimModel {
     bool m_packetSent;
     bool m_payloadReady;
     bool m_fifoOverrun;
+    bool m_stallPacketSent;
+    //! Hold a queued packet between FifoOverrun and RxRestart writes
+    bool m_rxRestartPending;
 
     // In-progress transmission: bytes drain from the FIFO by the byte clock
     bool m_txActive;

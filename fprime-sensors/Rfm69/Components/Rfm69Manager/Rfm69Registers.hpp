@@ -27,19 +27,31 @@ constexpr U8 FRF_MID = 0x08;          //!< RF carrier frequency, middle byte
 constexpr U8 FRF_LSB = 0x09;          //!< RF carrier frequency, LSB
 constexpr U8 VERSION = 0x10;          //!< Silicon version
 constexpr U8 PA_LEVEL = 0x11;         //!< PA selection and output power
+constexpr U8 OCP = 0x13;              //!< Over-current protection control
 constexpr U8 RX_BW = 0x19;            //!< Channel filter bandwidth
+constexpr U8 AFC_BW = 0x1A;           //!< AFC channel filter bandwidth
 constexpr U8 DIO_MAPPING_2 = 0x26;    //!< DIO4/DIO5 mapping, CLKOUT frequency
 constexpr U8 IRQ_FLAGS_1 = 0x27;      //!< Mode/PLL status flags
 constexpr U8 IRQ_FLAGS_2 = 0x28;      //!< FIFO handling flags
 constexpr U8 RSSI_VALUE = 0x24;       //!< RSSI value (-value/2 dBm)
 constexpr U8 RSSI_THRESH = 0x29;      //!< RSSI threshold
+constexpr U8 PREAMBLE_MSB = 0x2C;     //!< Preamble length, MSB
+constexpr U8 PREAMBLE_LSB = 0x2D;     //!< Preamble length, LSB
 constexpr U8 SYNC_CONFIG = 0x2E;      //!< Sync word recognition control
 constexpr U8 SYNC_VALUE_1 = 0x2F;     //!< Sync word byte 1
 constexpr U8 SYNC_VALUE_2 = 0x30;     //!< Sync word byte 2
+constexpr U8 SYNC_VALUE_3 = 0x31;     //!< Sync word byte 3
+constexpr U8 SYNC_VALUE_4 = 0x32;     //!< Sync word byte 4
+constexpr U8 SYNC_VALUE_5 = 0x33;     //!< Sync word byte 5
+constexpr U8 SYNC_VALUE_6 = 0x34;     //!< Sync word byte 6
+constexpr U8 SYNC_VALUE_7 = 0x35;     //!< Sync word byte 7
+constexpr U8 SYNC_VALUE_8 = 0x36;     //!< Sync word byte 8
 constexpr U8 PACKET_CONFIG_1 = 0x37;  //!< Packet mode settings
 constexpr U8 PAYLOAD_LENGTH = 0x38;   //!< Max payload length (variable mode)
 constexpr U8 FIFO_THRESH = 0x3C;      //!< FIFO threshold, TX start condition
 constexpr U8 PACKET_CONFIG_2 = 0x3D;  //!< Packet mode settings
+constexpr U8 TEST_PA_1 = 0x5A;        //!< High-power PA test register 1
+constexpr U8 TEST_PA_2 = 0x5C;        //!< High-power PA test register 2
 constexpr U8 TEST_DAGC = 0x6F;        //!< Fading margin improvement
 }  // namespace Reg
 
@@ -72,6 +84,23 @@ constexpr U8 PACKET_SENT = 0x08;
 constexpr U8 PAYLOAD_READY = 0x04;
 }  // namespace IrqFlags2
 
+//! RegPacketConfig2 commands
+namespace PacketConfig2 {
+constexpr U8 AUTO_RX_RESTART_ON = 0x02;
+constexpr U8 RX_RESTART = 0x04;
+}  // namespace PacketConfig2
+
+//! PA and high-power test values. DBM_20 enables boost only during TX and
+//! restores normal/OCP-protected values immediately after returning to RX.
+namespace Pa {
+constexpr U8 OCP_NORMAL = 0x1A;
+constexpr U8 OCP_DISABLED = 0x0F;
+constexpr U8 TEST_PA_1_NORMAL = 0x55;
+constexpr U8 TEST_PA_1_BOOST = 0x5D;
+constexpr U8 TEST_PA_2_NORMAL = 0x70;
+constexpr U8 TEST_PA_2_BOOST = 0x7C;
+}  // namespace Pa
+
 //! SPI address byte: write access flag (wnr bit, datasheet section 5.2.1)
 constexpr U8 SPI_WRITE_FLAG = 0x80;
 //! SPI address byte: register address mask
@@ -83,9 +112,8 @@ constexpr U8 VERSION_VALUE = 0x24;
 constexpr FwSizeType FIFO_SIZE = 66;
 //! FIFO threshold programmed into RegFifoThresh (FifoLevel trip point)
 constexpr U8 FIFO_THRESHOLD = 0x0F;
-//! Maximum payload bytes per variable-length packet: the length byte
-//! ranges to 255; packets larger than the FIFO are streamed through it
-//! (datasheet section 5.2.2.3)
+//! RFM69 variable-length packet payload maximum. Packets above the 66-byte
+//! hardware FIFO are streamed while in flight.
 constexpr FwSizeType MAX_PACKET_PAYLOAD = 255;
 //! Bytes safe to burst-write into the FIFO while FifoLevel reads clear
 //! (FIFO_SIZE less the threshold, with margin)

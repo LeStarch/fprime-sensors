@@ -10,6 +10,18 @@
 
 namespace Rfm69 {
 
+namespace {
+
+bool parameterValueIsUsable(Fw::ParamValid valid) {
+    return (valid == Fw::ParamValid::VALID) || (valid == Fw::ParamValid::DEFAULT);
+}
+
+}  // namespace
+
+// C++14 requires storage for these class constants when chrono binds them.
+constexpr U32 Rfm69Manager::MODE_READY_TIMEOUT_USEC;
+constexpr U32 Rfm69Manager::PACKET_DEADLINE_MARGIN_USEC;
+
 // ----------------------------------------------------------------------
 // Construction, initialization, and destruction
 // ----------------------------------------------------------------------
@@ -18,9 +30,13 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
     : Rfm69ManagerComponentBase(compName),
       m_state(DETECT),
       m_configured(false),
-      m_frequencyHz(DEFAULT_FREQUENCY_HZ),
-      m_networkId(DEFAULT_NETWORK_ID),
-      m_powerLevel(DEFAULT_POWER_LEVEL),
+      m_dataRate(Rfm69DataRate::BR_9600),
+      m_bandwidthRx(Rfm69Bandwidth::BW_500_KHZ),
+      m_frequencyDeviation(Rfm69Deviation::FDEV_25_KHZ),
+      m_modulationShaping(Rfm69ModulationShaping::FSK_NONE),
+      m_txPower(Rfm69TxPower::DBM_13),
+      m_frequencyHz(915000000),
+      m_networkId(0xA7),
       m_packetsTransmitted(0),
       m_packetsReceived(0),
       m_transmitFailures(0),
@@ -30,16 +46,136 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_deferredValid(false),
       m_transmitEnabled(TransmitState::ENABLED),
       m_resetPulsed(false),
+      m_comStatusAnnounced(false),
       m_mosi{},
       m_miso{} {}
 
 Rfm69Manager ::~Rfm69Manager() {}
 
-void Rfm69Manager ::configure(U32 frequencyHz, U8 networkId, U8 powerLevel) {
-    this->m_frequencyHz = frequencyHz;
-    this->m_networkId = networkId;
-    this->m_powerLevel = powerLevel;
+void Rfm69Manager ::applyParameters() {
+    Fw::ParamValid valid = Fw::ParamValid::INVALID;
+    const Rfm69DataRate dataRate = this->paramGet_DATA_RATE(valid);
+    if (parameterValueIsUsable(valid)) {
+        this->m_dataRate = dataRate;
+    }
+    const Rfm69Bandwidth bandwidthRx = this->paramGet_BANDWIDTH_RX(valid);
+    if (parameterValueIsUsable(valid)) {
+        this->m_bandwidthRx = bandwidthRx;
+    }
+    const Rfm69Deviation frequencyDeviation = this->paramGet_FREQUENCY_DEVIATION(valid);
+    if (parameterValueIsUsable(valid)) {
+        this->m_frequencyDeviation = frequencyDeviation;
+    }
+    const Rfm69ModulationShaping modulationShaping = this->paramGet_MODULATION_SHAPING(valid);
+    if (parameterValueIsUsable(valid)) {
+        this->m_modulationShaping = modulationShaping;
+    }
+    const Rfm69TxPower txPower = this->paramGet_TX_POWER(valid);
+    if (parameterValueIsUsable(valid)) {
+        this->m_txPower = txPower;
+    }
+    const U32 frequencyHz = this->paramGet_FREQUENCY_HZ(valid);
+    if (parameterValueIsUsable(valid)) {
+        this->m_frequencyHz = frequencyHz;
+    }
+    const U8 networkId = this->paramGet_NETWORK_ID(valid);
+    if (parameterValueIsUsable(valid)) {
+        this->m_networkId = networkId;
+    }
     this->m_configured = true;
+    this->tlmWrite_DataRate(this->m_dataRate);
+    this->tlmWrite_BandwidthRx(this->m_bandwidthRx);
+    this->tlmWrite_FrequencyDeviation(this->m_frequencyDeviation);
+    this->tlmWrite_ModulationShaping(this->m_modulationShaping);
+    this->tlmWrite_TxPower(this->m_txPower);
+    this->tlmWrite_FrequencyHz(this->m_frequencyHz);
+    this->tlmWrite_NetworkId(this->m_networkId);
+}
+
+void Rfm69Manager ::requestReconfigure() {
+    // The radio will leave READY while registers are rewritten. Return a held
+    // Com buffer with failure rather than silently losing ownership.
+    this->finishDeferredTransmit(Fw::Success::FAILURE);
+    if (this->m_state == DETECT) {
+        return;
+    }
+    this->m_state = CONFIGURE;
+}
+
+void Rfm69Manager ::parameterUpdated(FwPrmIdType id) {
+    Os::ScopeLock lock(this->m_lock);
+    Fw::ParamValid valid = Fw::ParamValid::INVALID;
+    switch (id) {
+        case PARAMID_DATA_RATE: {
+            const Rfm69DataRate dataRate = this->paramGet_DATA_RATE(valid);
+            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
+            this->m_dataRate = dataRate;
+            this->log_ACTIVITY_HI_DataRateUpdated(dataRate);
+            this->tlmWrite_DataRate(dataRate);
+            break;
+        }
+        case PARAMID_BANDWIDTH_RX: {
+            const Rfm69Bandwidth bandwidthRx = this->paramGet_BANDWIDTH_RX(valid);
+            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
+            this->m_bandwidthRx = bandwidthRx;
+            this->log_ACTIVITY_HI_BandwidthRxUpdated(bandwidthRx);
+            this->tlmWrite_BandwidthRx(bandwidthRx);
+            break;
+        }
+        case PARAMID_FREQUENCY_DEVIATION: {
+            const Rfm69Deviation frequencyDeviation = this->paramGet_FREQUENCY_DEVIATION(valid);
+            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
+            this->m_frequencyDeviation = frequencyDeviation;
+            this->log_ACTIVITY_HI_FrequencyDeviationUpdated(frequencyDeviation);
+            this->tlmWrite_FrequencyDeviation(frequencyDeviation);
+            break;
+        }
+        case PARAMID_MODULATION_SHAPING: {
+            const Rfm69ModulationShaping modulationShaping = this->paramGet_MODULATION_SHAPING(valid);
+            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
+            this->m_modulationShaping = modulationShaping;
+            this->log_ACTIVITY_HI_ModulationShapingUpdated(modulationShaping);
+            this->tlmWrite_ModulationShaping(modulationShaping);
+            break;
+        }
+        case PARAMID_TX_POWER: {
+            const Rfm69TxPower txPower = this->paramGet_TX_POWER(valid);
+            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
+            this->m_txPower = txPower;
+            this->log_ACTIVITY_HI_TxPowerUpdated(txPower);
+            this->tlmWrite_TxPower(txPower);
+            break;
+        }
+        case PARAMID_FREQUENCY_HZ: {
+            const U32 frequencyHz = this->paramGet_FREQUENCY_HZ(valid);
+            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
+            this->m_frequencyHz = frequencyHz;
+            this->log_ACTIVITY_HI_FrequencyUpdated(frequencyHz);
+            this->tlmWrite_FrequencyHz(frequencyHz);
+            break;
+        }
+        case PARAMID_NETWORK_ID: {
+            const U8 networkId = this->paramGet_NETWORK_ID(valid);
+            FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
+            this->m_networkId = networkId;
+            this->log_ACTIVITY_HI_NetworkIdUpdated(networkId);
+            this->tlmWrite_NetworkId(networkId);
+            break;
+        }
+        default:
+            FW_ASSERT(0, static_cast<FwAssertArgType>(id));
+            break;
+    }
+    this->m_configured = true;
+    this->requestReconfigure();
+}
+
+void Rfm69Manager ::parametersLoaded() {
+    // The topology invokes loadParameters() before starting rate groups. This
+    // is the deployment's single source of radio configuration.
+    Os::ScopeLock lock(this->m_lock);
+    this->applyParameters();
+    this->requestReconfigure();
 }
 
 // ----------------------------------------------------------------------
@@ -70,6 +206,10 @@ void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const 
         if (this->transmitFrame(data)) {
             status = Fw::Success::SUCCESS;
         }
+    } else if ((this->m_state == READY) && this->m_deferredValid) {
+        // Keep exactly one deferred frame. The new frame is returned below
+        // with FAILURE; the deferred owner remains responsible for its frame.
+        this->log_WARNING_HI_TransmitBusyDeferred();
     } else {
         this->log_WARNING_HI_RadioNotReady();
     }
@@ -98,7 +238,7 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
 // ----------------------------------------------------------------------
 
 void Rfm69Manager ::initializeRadio() {
-    // Wait for configure() before touching the bus
+    // Do not touch the bus before the deployment has loaded its parameters.
     if (!this->m_configured) {
         return;
     }
@@ -120,29 +260,30 @@ void Rfm69Manager ::initializeRadio() {
         if (this->configureRadio() && this->setMode(Mode::RX)) {
             this->m_state = READY;
             this->log_ACTIVITY_HI_RadioConfigured();
-            // Signal readiness for the first frame
-            if (this->isConnected_comStatusOut_OutputPort(0)) {
+            // Com status is a one-time startup handshake. Sending an extra
+            // SUCCESS after a hardware reset is invalid while the downstream
+            // aggregator is already READY and causes it to assert.
+            if (!this->m_comStatusAnnounced && this->isConnected_comStatusOut_OutputPort(0)) {
                 Fw::Success ready = Fw::Success::SUCCESS;
                 this->comStatusOut_out(0, ready);
+                this->m_comStatusAnnounced = true;
             }
         } else {
-            this->log_WARNING_HI_RadioConfigurationFailed();
+            this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
         }
     }
 }
 
 bool Rfm69Manager ::transmitFrame(Fw::Buffer& data) {
-    // Segment the frame into radio packets; the receiving side's frame
-    // accumulator reassembles the byte stream
-    const U8* const bytes = data.getData();
+    // The deployment's fixed 255-byte telemetry frame maps to exactly one
+    // native RFM69 variable-length packet. There is intentionally no hidden
+    // radio segmentation or reassembly contract.
     const FwSizeType size = data.getSize();
-    bool success = true;
-    FwSizeType offset = 0;
-    do {
-        const FwSizeType chunk = FW_MIN(size - offset, MAX_PACKET_PAYLOAD);
-        success = this->transmitPacket(&bytes[offset], chunk);
-        offset += chunk;
-    } while (success && (offset < size));
+    if ((size == 0) || (size > MAX_PACKET_PAYLOAD)) {
+        this->log_WARNING_HI_FrameTooLarge(static_cast<U32>(size));
+        return false;
+    }
+    const bool success = this->transmitPacket(data.getData(), size);
     if (!success) {
         this->m_transmitFailures++;
         this->log_WARNING_HI_TransmitFailed();
@@ -151,16 +292,37 @@ bool Rfm69Manager ::transmitFrame(Fw::Buffer& data) {
     return success;
 }
 
+void Rfm69Manager ::finishDeferredTransmit(Fw::Success status) {
+    if (!this->m_deferredValid) {
+        return;
+    }
+    // Clear the state before invoking downstream ports: their synchronous
+    // callbacks may cause a new frame to arrive as soon as this lock releases.
+    Fw::Buffer buffer = this->m_deferredBuffer;
+    const ComCfg::FrameContext context = this->m_deferredContext;
+    this->m_deferredValid = false;
+    this->m_deferredBuffer = Fw::Buffer();
+    this->m_deferredContext = ComCfg::FrameContext();
+    this->dataReturnOut_out(0, buffer, context);
+    if (this->isConnected_comStatusOut_OutputPort(0)) {
+        this->comStatusOut_out(0, status);
+    }
+}
+
 void Rfm69Manager ::retryDeferredTransmit() {
     if (!this->m_deferredValid || this->channelBusy()) {
         return;
     }
+    Fw::Buffer buffer = this->m_deferredBuffer;
+    const ComCfg::FrameContext context = this->m_deferredContext;
     this->m_deferredValid = false;
+    this->m_deferredBuffer = Fw::Buffer();
+    this->m_deferredContext = ComCfg::FrameContext();
     Fw::Success status = Fw::Success::FAILURE;
-    if (this->transmitFrame(this->m_deferredBuffer)) {
+    if (this->transmitFrame(buffer)) {
         status = Fw::Success::SUCCESS;
     }
-    this->dataReturnOut_out(0, this->m_deferredBuffer, this->m_deferredContext);
+    this->dataReturnOut_out(0, buffer, context);
     if (this->isConnected_comStatusOut_OutputPort(0)) {
         this->comStatusOut_out(0, status);
     }
@@ -178,6 +340,32 @@ void Rfm69Manager ::TRANSMIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, Rfm69::
     this->tlmWrite_TransmitEnabled(enabled);
     this->log_ACTIVITY_HI_TransmitStateChanged(enabled);
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
+}
+
+void Rfm69Manager ::RECONFIGURE_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
+    {
+        Os::ScopeLock lock(this->m_lock);
+        this->applyParameters();
+        this->requestReconfigure();
+    }
+    this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
+}
+
+void Rfm69Manager ::RESET_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
+    Fw::CmdResponse response = Fw::CmdResponse::EXECUTION_ERROR;
+    {
+        Os::ScopeLock lock(this->m_lock);
+        // Return a pending downlink buffer before changing hardware state. The
+        // next scheduler tick performs the normal detect/configure sequence.
+        this->finishDeferredTransmit(Fw::Success::FAILURE);
+        if (this->pulseReset()) {
+            this->m_resetPulsed = true;
+            this->m_state = DETECT;
+            this->log_ACTIVITY_HI_RadioReset();
+            response = Fw::CmdResponse::OK;
+        }
+    }
+    this->cmdResponse_out(opCode, cmdSeq, response);
 }
 
 bool Rfm69Manager ::pulseReset() {
@@ -235,6 +423,11 @@ void Rfm69Manager ::pollReceive() {
         this->tlmWrite_PacketsReceived(this->m_packetsReceived);
         ComCfg::FrameContext context;
         this->dataOut_out(0, buffer, context);
+        // readReceivedPacket() drains the entire variable-length packet and
+        // restarts the receiver.  The IRQ state can take a short time to
+        // settle after that restart, so defer a possible next packet to the
+        // next polling tick instead of treating stale flags as another frame.
+        break;
     }
 }
 

@@ -9,10 +9,13 @@
 namespace Rfm69 {
 
 Rfm69SimModel::Rfm69SimModel()
-    : m_fifoCount(0),
+    : m_registerWriteCount(0),
+      m_fifoCount(0),
       m_packetSent(false),
       m_payloadReady(false),
       m_fifoOverrun(false),
+      m_stallPacketSent(false),
+      m_rxRestartPending(false),
       m_txActive(false),
       m_txExpected(0),
       m_txCollected(0),
@@ -26,6 +29,8 @@ Rfm69SimModel::Rfm69SimModel()
 
 void Rfm69SimModel::reset() {
     (void)::memset(this->m_registers, 0, sizeof this->m_registers);
+    (void)::memset(this->m_registerWriteAddresses, 0, sizeof this->m_registerWriteAddresses);
+    (void)::memset(this->m_registerWriteValues, 0, sizeof this->m_registerWriteValues);
     (void)::memset(this->m_fifo, 0, sizeof this->m_fifo);
     (void)::memset(this->m_txAccum, 0, sizeof this->m_txAccum);
     (void)::memset(this->m_rxPacket, 0, sizeof this->m_rxPacket);
@@ -51,9 +56,12 @@ void Rfm69SimModel::reset() {
     this->m_registers[Reg::FIFO_THRESH] = 0x0F;
     this->m_registers[Reg::PACKET_CONFIG_2] = 0x02;
     this->m_fifoCount = 0;
+    this->m_registerWriteCount = 0;
     this->m_packetSent = false;
     this->m_payloadReady = false;
     this->m_fifoOverrun = false;
+    this->m_stallPacketSent = false;
+    this->m_rxRestartPending = false;
     this->m_txActive = false;
     this->m_txExpected = 0;
     this->m_txCollected = 0;
@@ -125,6 +133,28 @@ FwSizeType Rfm69SimModel::retrievePacket(U8* data, FwSizeType capacity) {
     return size;
 }
 
+U8 Rfm69SimModel::readRegisterValue(U8 address) const {
+    return this->m_registers[address & SPI_ADDRESS_MASK];
+}
+
+void Rfm69SimModel::setPacketSentStall(bool stall) {
+    this->m_stallPacketSent = stall;
+}
+
+void Rfm69SimModel::clearRegisterWriteHistory() {
+    this->m_registerWriteCount = 0;
+}
+
+bool Rfm69SimModel::wasRegisterWritten(U8 address, U8 value) const {
+    const U8 normalizedAddress = address & SPI_ADDRESS_MASK;
+    for (FwSizeType i = 0; i < this->m_registerWriteCount; i++) {
+        if ((this->m_registerWriteAddresses[i] == normalizedAddress) && (this->m_registerWriteValues[i] == value)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Rfm69SimModel::advanceClock(FwSizeType byteTimes) {
     const U8 mode = this->m_registers[Reg::OP_MODE] & Mode::MASK;
     for (FwSizeType t = 0; t < byteTimes; t++) {
@@ -132,10 +162,18 @@ void Rfm69SimModel::advanceClock(FwSizeType byteTimes) {
             if (!this->m_txActive && (this->m_fifoCount > 0)) {
                 this->startTransmit();
             }
-            if (this->m_txActive && (this->m_fifoCount > 0)) {
+            // A stalled PacketSent leaves the completed TX active until the
+            // manager changes mode. Do not consume or write beyond m_txAccum
+            // after its expected payload has already been collected.
+            if (this->m_txActive && (this->m_txCollected < this->m_txExpected) && (this->m_fifoCount > 0)) {
                 this->m_txAccum[this->m_txCollected] = this->fifoPop();
                 this->m_txCollected++;
                 if (this->m_txCollected >= this->m_txExpected) {
+                    if (this->m_stallPacketSent) {
+                        // Leave TX active and PacketSent clear until the
+                        // manager's timeout returns the device to RX.
+                        continue;
+                    }
                     // Packet fully clocked out over the air
                     if (this->m_txCount < TX_QUEUE_DEPTH) {
                         (void)::memcpy(this->m_txQueue[this->m_txCount], this->m_txAccum, this->m_txExpected);
@@ -147,7 +185,7 @@ void Rfm69SimModel::advanceClock(FwSizeType byteTimes) {
                 }
             }
         } else if (mode == Mode::RX) {
-            if (!this->m_rxActive) {
+            if (!this->m_rxActive && !this->m_rxRestartPending) {
                 this->startReceive();
             }
             if (this->m_rxActive && (this->m_fifoCount < FIFO_SIZE)) {
@@ -168,11 +206,6 @@ U8 Rfm69SimModel::readRegister(U8 address) {
         case Reg::FIFO:
             if (this->m_fifoCount > 0) {
                 value = this->fifoPop();
-                if ((this->m_fifoCount == 0) && !this->m_rxActive) {
-                    // FIFO empty: PayloadReady clears; next packet may load
-                    this->m_payloadReady = false;
-                    this->startReceive();
-                }
             }
             break;
         case Reg::IRQ_FLAGS_1:
@@ -189,6 +222,12 @@ U8 Rfm69SimModel::readRegister(U8 address) {
 }
 
 void Rfm69SimModel::writeRegister(U8 address, U8 value) {
+    const U8 normalizedAddress = address & SPI_ADDRESS_MASK;
+    if ((normalizedAddress != Reg::FIFO) && (this->m_registerWriteCount < REGISTER_WRITE_HISTORY_SIZE)) {
+        this->m_registerWriteAddresses[this->m_registerWriteCount] = normalizedAddress;
+        this->m_registerWriteValues[this->m_registerWriteCount] = value;
+        this->m_registerWriteCount++;
+    }
     switch (address) {
         case Reg::FIFO:
             this->fifoPush(value);
@@ -200,6 +239,24 @@ void Rfm69SimModel::writeRegister(U8 address, U8 value) {
                 this->m_fifoCount = 0;
                 this->m_payloadReady = false;
                 this->m_rxActive = false;
+                // The manager follows this FIFO flush with RxRestart. Do not
+                // begin consuming a queued packet in the SPI transaction
+                // between those two writes.
+                this->m_rxRestartPending = true;
+            }
+            break;
+        case Reg::PACKET_CONFIG_2:
+            // RxRestart (bit 2) is a command bit: it self-clears, flushes
+            // stale receive state, and makes a queued air packet eligible for
+            // a fresh receive cycle. AutoRxRestartOn (bit 1) remains set.
+            this->m_registers[Reg::PACKET_CONFIG_2] = static_cast<U8>(value & static_cast<U8>(~0x04));
+            if ((value & 0x04) != 0) {
+                this->m_fifoCount = 0;
+                this->m_payloadReady = false;
+                this->m_fifoOverrun = false;
+                this->m_rxActive = false;
+                this->m_rxRestartPending = false;
+                this->startReceive();
             }
             break;
         case Reg::OP_MODE: {
@@ -226,6 +283,7 @@ void Rfm69SimModel::handleModeChange(U8 mode) {
         this->m_packetSent = false;
         this->m_txActive = false;
         this->m_fifoCount = 0;
+        this->m_rxRestartPending = false;
         this->startReceive();
     } else {
         this->m_packetSent = false;
@@ -259,7 +317,10 @@ void Rfm69SimModel::startTransmit() {
     const FwSizeType length = this->fifoPop();
     if (length == 0) {
         // Zero-length packet: nothing on the air, but the packet completes
-        this->m_packetSent = true;
+        this->m_txExpected = 0;
+        this->m_txCollected = 0;
+        this->m_txActive = this->m_stallPacketSent;
+        this->m_packetSent = !this->m_stallPacketSent;
         return;
     }
     this->m_txExpected = FW_MIN(length, sizeof this->m_txAccum);
@@ -270,7 +331,7 @@ void Rfm69SimModel::startTransmit() {
 void Rfm69SimModel::startReceive() {
     // Begin delivery only when in RX, idle, with a drained FIFO
     if (((this->m_registers[Reg::OP_MODE] & Mode::MASK) != Mode::RX) || this->m_rxActive || this->m_payloadReady ||
-        (this->m_fifoCount != 0) || (this->m_airCount == 0)) {
+        this->m_rxRestartPending || (this->m_fifoCount != 0) || (this->m_airCount == 0)) {
         return;
     }
     const FwSizeType payloadSize = FW_MIN(this->m_airCount, MAX_PACKET_PAYLOAD);

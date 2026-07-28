@@ -48,9 +48,11 @@ bool Rfm69Manager ::detectRadio() {
 bool Rfm69Manager ::configureRadio() {
     // Frf register value: frequency / (32 MHz / 2^19) (datasheet section 4.2.4)
     const U32 frf = static_cast<U32>((static_cast<U64>(this->m_frequencyHz) * FRF_DIVISOR) / CRYSTAL_HZ);
-    // Bit rate 55.555 kb/s and 50 kHz deviation: common RFM69 FSK settings
-    constexpr U16 BITRATE = 0x0240;  // 32 MHz / 55555 bps
-    constexpr U16 FDEV = 0x0333;     // 50 kHz / 61 Hz Fstep
+    // Validated 9.6 kb/s FSK with 25 kHz deviation. A 255-byte packet is
+    // streamed through the 66-byte FIFO; each threshold crossing is serviced
+    // with a burst SPI transfer.
+    constexpr U16 BITRATE = 0x0D05;  // 32 MHz / 9,600 bps
+    constexpr U16 FDEV = 0x019A;     // 25 kHz / 61.035 Hz Fstep
     const struct {
         U8 address;
         U8 value;
@@ -66,14 +68,23 @@ bool Rfm69Manager ::configureRadio() {
         {Reg::FRF_LSB, static_cast<U8>(frf & 0xFF)},
         // RFM69HCW: PA1 on (PA0 is not connected on this module)
         {Reg::PA_LEVEL, static_cast<U8>(0x40 | (this->m_powerLevel & 0x1F))},
-        {Reg::RX_BW, 0x55},                                          // Recommended default (Table 23)
+        {Reg::RX_BW, 0xE0},
+        {Reg::AFC_BW, 0xE0},
         {Reg::DIO_MAPPING_2, 0x07},                                  // CLKOUT off
         {Reg::RSSI_THRESH, 0xE4},                                    // Recommended default
-        {Reg::SYNC_CONFIG, 0x88},                                    // Sync on, 2 sync bytes
-        {Reg::SYNC_VALUE_1, 0x2D},                                   // Fixed first sync byte
-        {Reg::SYNC_VALUE_2, this->m_networkId},                      // Network ID
-        {Reg::PACKET_CONFIG_1, 0x90},                                // Variable length, CRC on
-        {Reg::PAYLOAD_LENGTH, 0xFF},                                 // Max RX length: full 255-byte packets
+        {Reg::PREAMBLE_MSB, 0x00},
+        {Reg::PREAMBLE_LSB, 0x04},
+        {Reg::SYNC_CONFIG, 0xB8},                                    // Sync on, 8 sync bytes
+        {Reg::SYNC_VALUE_1, 0x2D},
+        {Reg::SYNC_VALUE_2, this->m_networkId},
+        {Reg::SYNC_VALUE_3, 0x5C},
+        {Reg::SYNC_VALUE_4, 0x39},
+        {Reg::SYNC_VALUE_5, 0xD1},
+        {Reg::SYNC_VALUE_6, 0x6E},
+        {Reg::SYNC_VALUE_7, 0x84},
+        {Reg::SYNC_VALUE_8, 0xF2},
+        {Reg::PACKET_CONFIG_1, 0xD0},                                // Variable length, whitening, CRC
+        {Reg::PAYLOAD_LENGTH, static_cast<U8>(MAX_PACKET_PAYLOAD)},  // 255-byte RF packet limit
         {Reg::FIFO_THRESH, static_cast<U8>(0x80 | FIFO_THRESHOLD)},  // TX start on FifoNotEmpty
         {Reg::PACKET_CONFIG_2, 0x02},                                // Auto RX restart
         {Reg::TEST_DAGC, 0x30},                                      // Recommended default
@@ -131,6 +142,20 @@ bool Rfm69Manager ::writeFifo(const U8* data, FwSizeType size) {
     Fw::Buffer writeBuffer(this->m_mosi, size + 1);
     Fw::Buffer readBuffer(this->m_miso, size + 1);
     return this->spiWriteRead_out(0, writeBuffer, readBuffer) == Drv::SpiStatus::SPI_OK;
+}
+
+bool Rfm69Manager ::readFifo(U8* data, FwSizeType size) {
+    FW_ASSERT(data != nullptr);
+    FW_ASSERT((size + 1) <= sizeof this->m_mosi, static_cast<FwAssertArgType>(size));
+    this->m_mosi[0] = Reg::FIFO;
+    (void)::memset(&this->m_mosi[1], 0, size);
+    Fw::Buffer writeBuffer(this->m_mosi, size + 1);
+    Fw::Buffer readBuffer(this->m_miso, size + 1);
+    if (this->spiWriteRead_out(0, writeBuffer, readBuffer) != Drv::SpiStatus::SPI_OK) {
+        return false;
+    }
+    (void)::memcpy(data, &this->m_miso[1], size);
+    return true;
 }
 
 bool Rfm69Manager ::transmitPacket(const U8* data, FwSizeType size) {
@@ -199,17 +224,38 @@ FwSizeType Rfm69Manager ::readReceivedPacket(U8* data, FwSizeType capacity) {
         if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
             return 0;
         }
-        if ((flags & IrqFlags2::FIFO_NOT_EMPTY) != 0) {
-            U8 value = 0;
-            if (this->readRegister(Reg::FIFO, value) != Drv::SpiStatus::SPI_OK) {
+        if ((flags & IrqFlags2::FIFO_OVERRUN) != 0) {
+            (void)this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);
+            return 0;
+        }
+
+        // Do not single-byte poll a streaming packet. At 250 kb/s that loses
+        // the race to the 66-byte FIFO on Linux. Once FifoLevel crosses the
+        // programmed threshold, drain a threshold-sized burst. At
+        // PayloadReady, the remaining bytes are all present and can be read
+        // in one final burst (including packets smaller than the threshold).
+        FwSizeType chunk = 0;
+        if ((flags & IrqFlags2::PAYLOAD_READY) != 0) {
+            chunk = static_cast<FwSizeType>(length) - received;
+        } else if ((flags & IrqFlags2::FIFO_LEVEL) != 0) {
+            chunk = FW_MIN(static_cast<FwSizeType>(FIFO_THRESHOLD), static_cast<FwSizeType>(length) - received);
+        }
+        if (chunk > 0) {
+            if (!this->readFifo(&data[received], chunk)) {
                 return 0;
             }
-            data[received++] = value;
+            received += chunk;
         }
     }
     if (received < static_cast<FwSizeType>(length)) {
         // Reception stalled: clear the FIFO to resynchronize
         (void)this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);
+        return 0;
+    }
+    // PayloadReady remains asserted after a complete variable-length packet.
+    // RegPacketConfig2.RxRestart is the documented receive re-arm command;
+    // it self-clears and preserves AutoRxRestartOn (bit 1).
+    if (this->writeRegister(Reg::PACKET_CONFIG_2, 0x06) != Drv::SpiStatus::SPI_OK) {
         return 0;
     }
     return received;
