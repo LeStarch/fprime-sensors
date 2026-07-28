@@ -174,6 +174,7 @@ inline bool getBandwidthSetting(const Rfm69Bandwidth& value, BandwidthSetting& s
 }
 
 inline bool getTxPowerSetting(const Rfm69TxPower& value, TxPowerSetting& setting) {
+    // DBM_0..13: PA1. DBM_17: PA1+PA2. DBM_20: PA1+PA2 + boost only while TX.
     if (value == Rfm69TxPower::DBM_0) {
         setting = {0x52, false};  // PA1, -18 + 18 dBm
     } else if (value == Rfm69TxPower::DBM_5) {
@@ -207,8 +208,8 @@ struct PacketProfile {
 constexpr PacketProfile NATIVE_PACKET_PROFILE = {
     4,
     {0x2D, 0xA7, 0x5C, 0x39, 0xD1, 0x6E, 0x84, 0xF2},
-    0xD0,  // variable length, whitening, CRC, no address filter
-    0x0F,
+    0xD0,  // PacketFormat=variable, DcFree=whitening, CrcOn; AES/unlimited off
+    0x0F,  // FifoThresh; configureRadio ORs TxStartCondition → RegFifoThresh=0x8F
     0x02,  // AutoRxRestartOn
     0x30,
 };

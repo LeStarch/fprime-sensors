@@ -65,9 +65,8 @@ bool Rfm69Manager ::detectRadio() {
 }
 
 bool Rfm69Manager ::configureRadio() {
-    // Resolve the three operator-selectable enums before touching the radio.
-    // The remaining modem values are the fixed native-packet profile declared
-    // in Rfm69Manager.hpp and mirrored by the RadioHead ground sketch.
+    // Operator params: DATA_RATE, BANDWIDTH_RX, TX_POWER. All other modem
+    // registers come from NATIVE_PACKET_PROFILE (must match the ground-station image).
     DataRateSetting dataRate{};
     BandwidthSetting bandwidth{};
     TxPowerSetting power{};
@@ -163,8 +162,7 @@ U32 Rfm69Manager ::packetDeadlineUsec(FwSizeType payloadBytes) const {
 }
 
 bool Rfm69Manager ::recoverReceive() {
-    // Flush a malformed/stalled FIFO then explicitly re-arm variable-length
-    // reception. RxRestart self-clears while preserving AutoRxRestartOn.
+    // Clear FIFO overrun and re-arm RX (AutoRxRestartOn | RxRestart → 0x06).
     const bool fifoCleared =
         this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN) == Drv::SpiStatus::SPI_OK;
     const bool restarted = this->writeRegister(Reg::PACKET_CONFIG_2,
@@ -235,10 +233,8 @@ bool Rfm69Manager ::transmitPacket(const U8* data, FwSizeType size) {
     if (!getTxPowerSetting(this->m_txPower, power)) {
         return false;
     }
-    // Load the initial FIFO fill while in standby: length byte then payload.
-    // Packets larger than the FIFO are streamed: the remainder is topped up
-    // during transmission whenever FifoLevel drops below the threshold
-    // (datasheet section 5.2.2.3)
+    // Load length + first FIFO fill in standby; stream the rest during TX
+    // (FIFO is 66 bytes; payloads up to 255 need top-ups — datasheet 5.2.2.3).
     if (!this->setMode(Mode::STANDBY)) {
         return false;
     }

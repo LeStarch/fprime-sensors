@@ -226,7 +226,7 @@ void Rfm69ManagerTester ::test_receive_large() {
 
 void Rfm69ManagerTester ::test_default_register_image() {
     this->makeReady();
-    // This is the canonical default enum image mirrored by the Feather:
+    // This is the canonical default enum image mirrored by the ground station:
     // BR_9600 / BW_500_KHZ / DBM_13 plus the fixed native-packet profile.
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::DATA_MODUL), 0x00);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_MSB), 0x0D);

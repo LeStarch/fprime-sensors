@@ -91,7 +91,7 @@ module Rfm69 {
         @ fixed-profile parameters were removed.
         param DATA_RATE: Rfm69DataRate default Rfm69DataRate.BR_9600 id 0
 
-        @ FSK receive/AFC filter bandwidth; default matches the Feather image.
+        @ FSK receive/AFC filter bandwidth; default matches the ground-station image.
         param BANDWIDTH_RX: Rfm69Bandwidth default Rfm69Bandwidth.BW_500_KHZ id 1
 
         @ HCW transmitter power configuration, including PA boost when needed.
@@ -127,8 +127,11 @@ module Rfm69 {
         # Telemetry
         # ----------------------------------------------------------------------
 
+        @ Successful RF packet transmissions
         telemetry PacketsTransmitted: U32
+        @ RF packets delivered on dataOut
         telemetry PacketsReceived: U32
+        @ RSSI of last received packet (dBm)
         telemetry LastRssi: F32
     }
 }

@@ -182,6 +182,7 @@ void Rfm69Manager ::initializeRadio() {
         if (this->detectRadio()) {
             this->m_state = CONFIGURE;
         } else {
+            // Same event as configure/RX failure: cannot bring the link up.
             this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
             return;
         }
@@ -204,9 +205,7 @@ void Rfm69Manager ::initializeRadio() {
 }
 
 bool Rfm69Manager ::transmitFrame(Fw::Buffer& data) {
-    // The deployment's fixed 255-byte telemetry frame maps to exactly one
-    // native RFM69 variable-length packet. There is intentionally no hidden
-    // radio segmentation or reassembly contract.
+    // One Com buffer → one RF packet (1..255). No radio-layer split/reassembly.
     const FwSizeType size = data.getSize();
     if ((size == 0) || (size > MAX_PACKET_PAYLOAD)) {
         this->log_WARNING_HI_SendFailed(static_cast<I32>(size));

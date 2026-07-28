@@ -23,7 +23,7 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
 
     // Fixed native-packet modem profile. DATA_RATE, BANDWIDTH_RX, and TX_POWER
     // are the only operator parameters; these values are deliberately compiled
-    // into both the flight and RadioHead ground implementations.
+    // into both the flight and ground-station implementations.
     static constexpr U8 FIXED_DATA_MODUL = 0x00;        //!< Packet FSK, no shaping
     static constexpr U16 FIXED_FDEV_REGISTER = 0x019A; //!< 25 kHz deviation
     static constexpr U32 FIXED_FREQUENCY_HZ = 915000000U;
@@ -40,11 +40,11 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     ~Rfm69Manager();
 
   private:
-    //! Radio management states
+    //! Software lifecycle: DETECT → CONFIGURE → READY (advanced on run)
     enum RadioState {
-        DETECT,     //!< Radio not yet detected on the SPI bus
-        CONFIGURE,  //!< Radio detected; configuration pending
-        READY       //!< Radio configured and in receive mode
+        DETECT,     //!< Looking for RegVersion on SPI
+        CONFIGURE,  //!< Writing profile + entering RX
+        READY       //!< Polling RX / accepting TX
     };
 
     // ----------------------------------------------------------------------
