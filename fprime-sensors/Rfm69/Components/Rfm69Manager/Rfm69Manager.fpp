@@ -111,33 +111,17 @@ module Rfm69 {
         # Events
         # ----------------------------------------------------------------------
 
-        event RadioConfigured() severity activity high format "RFM69 radio detected and configured"
-        event RadioNotDetected() severity warning high format "RFM69 radio not detected on SPI bus" throttle 5
+        @ Event to indicate configuration failure
         event ConfigurationFailed(mode: Rfm69Mode) severity warning high \
-            format "Failed to configure RFM69 into mode: {}" throttle 5
-        event TransmitFailed() severity warning high format "RFM69 packet transmission failed" throttle 5
-        event FrameTooLarge(frameSize: U32) severity warning high \
-            format "RFM69 frame rejected: {} bytes (valid range is 1-255)" throttle 5
-        event RadioNotReady() severity warning high \
-            format "RFM69 transmission requested before radio is ready" throttle 5
-        event BufferAllocationFailed() severity warning high \
-            format "RFM69 buffer allocation failed; dropping received packet" throttle 5
-        event ReceiveFailed() severity warning high format "RFM69 packet reception failed" throttle 5
-        event TransmitDeferred() severity activity low \
-            format "RFM69 transmission deferred: reception in progress" throttle 5
-        event TransmitBusyDeferred() severity warning high \
-            format "RFM69 transmission rejected: one deferred frame is pending" throttle 5
-        event ResetFailed(status: U8) severity warning high \
-            format "RFM69 reset GPIO operation failed: {}" throttle 5
-        event RadioReset() severity activity high format "RFM69 hardware reset requested"
-        event TransmitStateChanged(enabled: TransmitState) severity activity high \
-            format "RFM69 transmit state set to {}"
-        event DataRateUpdated(dataRate: Rfm69DataRate) severity activity high \
-            format "RFM69 data rate set to {}"
-        event BandwidthRxUpdated(bandwidth: Rfm69Bandwidth) severity activity high \
-            format "RFM69 RX bandwidth set to {}"
-        event TxPowerUpdated(txPower: Rfm69TxPower) severity activity high \
-            format "RFM69 TX power set to {}"
+            format "Failed to configure RFM69 into mode: {}" throttle 2
+
+        @ Event to indicate send failure
+        event SendFailed(status: I32) severity warning high \
+            format "Failed to send RFM69 message: {}" throttle 2
+
+        @ Event to indicate allocation failure
+        event AllocationFailed(allocation_size: FwSizeType) severity warning high \
+            format "Failed to allocate buffer of: {} bytes" throttle 2
 
         # ----------------------------------------------------------------------
         # Telemetry
@@ -145,12 +129,6 @@ module Rfm69 {
 
         telemetry PacketsTransmitted: U32
         telemetry PacketsReceived: U32
-        telemetry TransmitFailures: U32
-        telemetry TransmitsDeferred: U32
         telemetry LastRssi: F32
-        telemetry TransmitEnabled: TransmitState update on change
-        telemetry DataRate: Rfm69DataRate update on change
-        telemetry BandwidthRx: Rfm69Bandwidth update on change
-        telemetry TxPower: Rfm69TxPower update on change
     }
 }

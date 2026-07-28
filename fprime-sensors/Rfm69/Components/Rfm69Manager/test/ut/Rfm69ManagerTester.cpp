@@ -71,7 +71,8 @@ void Rfm69ManagerTester ::makeReady() {
     this->setDefaultParameters();
     this->component.loadParameters();
     this->invoke_to_run(0, 0);
-    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
     this->clearHistory();
 }
 
@@ -89,7 +90,7 @@ void Rfm69ManagerTester ::test_initialization() {
     this->setDefaultParameters();
     this->component.loadParameters();
     this->invoke_to_run(0, 0);
-    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     // Initial com status is SUCCESS (ready for the first frame)
     ASSERT_from_comStatusOut_SIZE(1);
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
@@ -101,12 +102,14 @@ void Rfm69ManagerTester ::test_detection_retry() {
     // SPI failure: radio not detected, no configuration attempted
     this->m_spiFail = true;
     this->invoke_to_run(0, 0);
-    ASSERT_EVENTS_RadioNotDetected_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed(0, Rfm69Mode::Receive);
     ASSERT_from_comStatusOut_SIZE(0);
     // Radio (SPI) recovers: detection retries and succeeds
     this->m_spiFail = false;
+    this->clearHistory();
     this->invoke_to_run(0, 0);
-    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     ASSERT_from_comStatusOut_SIZE(1);
 }
 
@@ -147,7 +150,8 @@ void Rfm69ManagerTester ::test_transmit_zero_size() {
     ASSERT_from_comStatusOut_SIZE(1);
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
     ASSERT_from_dataReturnOut_SIZE(1);
-    ASSERT_EVENTS_FrameTooLarge_SIZE(1);
+    ASSERT_EVENTS_SendFailed_SIZE(1);
+    ASSERT_EVENTS_SendFailed(0, 0);
     ASSERT_TLM_PacketsTransmitted_SIZE(0);
     U8 transmitted[MAX_PACKET_PAYLOAD];
     ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
@@ -166,7 +170,8 @@ void Rfm69ManagerTester ::test_transmit_oversize() {
     ASSERT_from_comStatusOut_SIZE(1);
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
     ASSERT_from_dataReturnOut_SIZE(1);
-    ASSERT_EVENTS_FrameTooLarge_SIZE(1);
+    ASSERT_EVENTS_SendFailed_SIZE(1);
+    ASSERT_EVENTS_SendFailed(0, static_cast<I32>(MAX_PACKET_PAYLOAD + 1));
     ASSERT_TLM_PacketsTransmitted_SIZE(0);
     U8 transmitted[MAX_PACKET_PAYLOAD];
     ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
@@ -252,9 +257,8 @@ void Rfm69ManagerTester ::test_high_power_boost_recovery() {
     this->paramSend_TX_POWER(0, 0);
     ASSERT_CMD_RESPONSE_SIZE(1);
     ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_TX_POWER_SET, 0, Fw::CmdResponse::OK);
-    ASSERT_EVENTS_TxPowerUpdated_SIZE(1);
     this->invoke_to_run(0, 0);
-    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::PA_LEVEL), 0x7F);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::OCP), Pa::OCP_NORMAL);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::TEST_PA_1), Pa::TEST_PA_1_NORMAL);
@@ -291,7 +295,6 @@ void Rfm69ManagerTester ::test_invalid_data_rate_falls_back_to_default() {
     // applies it. The manager must configure the complete default profile.
     this->invoke_to_run(0, 0);
     ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
-    ASSERT_EVENTS_RadioConfigured_SIZE(1);
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_MSB), 0x0D);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_LSB), 0x05);
@@ -308,12 +311,10 @@ void Rfm69ManagerTester ::test_bandwidth_update_reconfigure() {
     this->paramSend_BANDWIDTH_RX(0, 0);
     ASSERT_CMD_RESPONSE_SIZE(1);
     ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_BANDWIDTH_RX_SET, 0, Fw::CmdResponse::OK);
-    ASSERT_EVENTS_BandwidthRxUpdated_SIZE(1);
-    ASSERT_TLM_BandwidthRx(0, bandwidthRx);
     ASSERT_from_spiWriteRead_SIZE(0);
 
     this->invoke_to_run(0, 0);
-    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     ASSERT_from_comStatusOut_SIZE(0);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::RX_BW), 0xE9);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::AFC_BW), 0xE9);
@@ -358,11 +359,10 @@ void Rfm69ManagerTester ::test_parameter_update_reconfigure() {
     this->paramSend_DATA_RATE(0, 0);
     ASSERT_CMD_RESPONSE_SIZE(1);
     ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_DATA_RATE_SET, 0, Fw::CmdResponse::OK);
-    ASSERT_EVENTS_DataRateUpdated_SIZE(1);
     ASSERT_from_spiWriteRead_SIZE(0);
 
     this->invoke_to_run(0, 0);
-    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_MSB), 0x06);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_LSB), 0x83);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::DATA_MODUL), 0x00);
@@ -392,7 +392,6 @@ void Rfm69ManagerTester ::test_reset_recovery() {
     this->sendCmd_RESET(0, 0);
     ASSERT_CMD_RESPONSE_SIZE(1);
     ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_RESET, 0, Fw::CmdResponse::OK);
-    ASSERT_EVENTS_RadioReset_SIZE(1);
     ASSERT_from_resetGpio_SIZE(2);
     ASSERT_from_resetGpio(0, Fw::Logic::HIGH);
     ASSERT_from_resetGpio(1, Fw::Logic::LOW);
@@ -400,7 +399,7 @@ void Rfm69ManagerTester ::test_reset_recovery() {
     // The normal next scheduler tick redetects and configures the model. The
     // startup Com SUCCESS is intentionally not repeated after a reset.
     this->invoke_to_run(0, 0);
-    ASSERT_EVENTS_RadioConfigured_SIZE(1);
+    ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     ASSERT_from_comStatusOut_SIZE(0);
 
     this->clearHistory();
@@ -427,8 +426,6 @@ void Rfm69ManagerTester ::test_transmit_deferred() {
     Fw::Buffer buffer(data, sizeof data);
     ComCfg::FrameContext context;
     this->invoke_to_dataIn(0, buffer, context);
-    ASSERT_EVENTS_TransmitDeferred_SIZE(1);
-    ASSERT_TLM_TransmitsDeferred(0, 1);
     ASSERT_from_comStatusOut_SIZE(0);
     ASSERT_from_dataReturnOut_SIZE(0);
     U8 transmitted[MAX_PACKET_PAYLOAD + 1];
@@ -454,7 +451,6 @@ void Rfm69ManagerTester ::test_transmit_deferred_disabled() {
     Fw::Buffer buffer(data, sizeof data);
     ComCfg::FrameContext context;
     this->invoke_to_dataIn(0, buffer, context);
-    ASSERT_EVENTS_TransmitDeferred_SIZE(1);
     ASSERT_from_comStatusOut_SIZE(0);
     ASSERT_from_dataReturnOut_SIZE(0);
 
@@ -479,7 +475,8 @@ void Rfm69ManagerTester ::test_transmit_not_ready() {
     Fw::Buffer buffer(data, sizeof data);
     ComCfg::FrameContext context;
     this->invoke_to_dataIn(0, buffer, context);
-    ASSERT_EVENTS_RadioNotReady_SIZE(1);
+    ASSERT_EVENTS_SendFailed_SIZE(1);
+    ASSERT_EVENTS_SendFailed(0, -1);
     ASSERT_from_comStatusOut_SIZE(1);
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
     ASSERT_from_dataReturnOut_SIZE(1);
@@ -493,11 +490,11 @@ void Rfm69ManagerTester ::test_transmit_spi_failure() {
     Fw::Buffer buffer(data, sizeof data);
     ComCfg::FrameContext context;
     this->invoke_to_dataIn(0, buffer, context);
-    ASSERT_EVENTS_TransmitFailed_SIZE(1);
+    ASSERT_EVENTS_SendFailed_SIZE(1);
+    ASSERT_EVENTS_SendFailed(0, -1);
     ASSERT_from_comStatusOut_SIZE(1);
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
     ASSERT_from_dataReturnOut_SIZE(1);
-    ASSERT_TLM_TransmitFailures(0, 1);
 }
 
 void Rfm69ManagerTester ::test_transmit_timeout_recovery() {
@@ -508,11 +505,11 @@ void Rfm69ManagerTester ::test_transmit_timeout_recovery() {
     ComCfg::FrameContext context;
     this->invoke_to_dataIn(0, buffer, context);
 
-    ASSERT_EVENTS_TransmitFailed_SIZE(1);
+    ASSERT_EVENTS_SendFailed_SIZE(1);
+    ASSERT_EVENTS_SendFailed(0, -1);
     ASSERT_from_comStatusOut_SIZE(1);
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
     ASSERT_from_dataReturnOut_SIZE(1);
-    ASSERT_TLM_TransmitFailures(0, 1);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::OP_MODE) & Mode::MASK, Mode::RX);
     U8 transmitted[MAX_PACKET_PAYLOAD];
     ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
@@ -564,7 +561,8 @@ void Rfm69ManagerTester ::test_receive_allocation_failure() {
     this->m_allocFail = true;
     this->invoke_to_run(0, 0);
     // Packet dropped with an event; nothing delivered downstream
-    ASSERT_EVENTS_BufferAllocationFailed_SIZE(1);
+    ASSERT_EVENTS_AllocationFailed_SIZE(1);
+    ASSERT_EVENTS_AllocationFailed(0, sizeof data);
     ASSERT_from_dataOut_SIZE(0);
     // Link stays alive: a later packet is delivered once allocation recovers
     this->m_allocFail = false;
@@ -588,8 +586,6 @@ void Rfm69ManagerTester ::test_transmit_disabled() {
     this->sendCmd_TRANSMIT(0, 0, Rfm69::TransmitState::DISABLED);
     ASSERT_CMD_RESPONSE_SIZE(1);
     ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_TRANSMIT, 0, Fw::CmdResponse::OK);
-    ASSERT_EVENTS_TransmitStateChanged_SIZE(1);
-    ASSERT_TLM_TransmitEnabled(0, Rfm69::TransmitState::DISABLED);
     this->clearHistory();
 
     // A downlink frame while disabled: no SPI transmit, but Com flow control
@@ -609,7 +605,6 @@ void Rfm69ManagerTester ::test_transmit_disabled() {
 
     // Re-enable transmit: the next frame is sent over SPI as normal
     this->sendCmd_TRANSMIT(0, 1, Rfm69::TransmitState::ENABLED);
-    ASSERT_TLM_TransmitEnabled(0, Rfm69::TransmitState::ENABLED);
     this->clearHistory();
     this->invoke_to_dataIn(0, buffer, context);
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));

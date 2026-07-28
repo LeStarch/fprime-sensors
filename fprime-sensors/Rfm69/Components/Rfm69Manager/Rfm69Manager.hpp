@@ -188,8 +188,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     Rfm69TxPower m_txPower;    //!< HCW PA configuration
     U32 m_packetsTransmitted;  //!< Count of transmitted packets
     U32 m_packetsReceived;     //!< Count of received packets
-    U32 m_transmitFailures;    //!< Count of failed transmissions
-    U32 m_transmitsDeferred;   //!< Count of transmissions deferred by listen-before-talk
     TransmitState m_transmitEnabled;  //!< Whether downlink transmit is permitted
     bool m_resetPulsed;                //!< True once a reset pulse has been issued
     bool m_comStatusAnnounced;          //!< Initial link-ready status has been sent

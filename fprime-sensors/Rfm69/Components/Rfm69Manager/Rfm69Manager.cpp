@@ -35,14 +35,12 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_txPower(Rfm69TxPower::DBM_13),
       m_packetsTransmitted(0),
       m_packetsReceived(0),
-      m_transmitFailures(0),
-      m_transmitsDeferred(0),
-      m_deferredBuffer(),
-      m_deferredContext(),
-      m_deferredValid(false),
       m_transmitEnabled(TransmitState::ENABLED),
       m_resetPulsed(false),
       m_comStatusAnnounced(false),
+      m_deferredBuffer(),
+      m_deferredContext(),
+      m_deferredValid(false),
       m_mosi{},
       m_miso{} {}
 
@@ -63,9 +61,6 @@ void Rfm69Manager ::applyParameters() {
         this->m_txPower = txPower;
     }
     this->m_configured = true;
-    this->tlmWrite_DataRate(this->m_dataRate);
-    this->tlmWrite_BandwidthRx(this->m_bandwidthRx);
-    this->tlmWrite_TxPower(this->m_txPower);
 }
 
 void Rfm69Manager ::requestReconfigure() {
@@ -86,24 +81,18 @@ void Rfm69Manager ::parameterUpdated(FwPrmIdType id) {
             const Rfm69DataRate dataRate = this->paramGet_DATA_RATE(valid);
             FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
             this->m_dataRate = dataRate;
-            this->log_ACTIVITY_HI_DataRateUpdated(dataRate);
-            this->tlmWrite_DataRate(dataRate);
             break;
         }
         case PARAMID_BANDWIDTH_RX: {
             const Rfm69Bandwidth bandwidthRx = this->paramGet_BANDWIDTH_RX(valid);
             FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
             this->m_bandwidthRx = bandwidthRx;
-            this->log_ACTIVITY_HI_BandwidthRxUpdated(bandwidthRx);
-            this->tlmWrite_BandwidthRx(bandwidthRx);
             break;
         }
         case PARAMID_TX_POWER: {
             const Rfm69TxPower txPower = this->paramGet_TX_POWER(valid);
             FW_ASSERT(valid == Fw::ParamValid::VALID, static_cast<FwAssertArgType>(valid));
             this->m_txPower = txPower;
-            this->log_ACTIVITY_HI_TxPowerUpdated(txPower);
-            this->tlmWrite_TxPower(txPower);
             break;
         }
         default:
@@ -142,9 +131,6 @@ void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const 
             this->m_deferredBuffer = data;
             this->m_deferredContext = context;
             this->m_deferredValid = true;
-            this->m_transmitsDeferred++;
-            this->log_ACTIVITY_LO_TransmitDeferred();
-            this->tlmWrite_TransmitsDeferred(this->m_transmitsDeferred);
             return;
         }
         if (this->transmitFrame(data)) {
@@ -153,9 +139,9 @@ void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const 
     } else if ((this->m_state == READY) && this->m_deferredValid) {
         // Keep exactly one deferred frame. The new frame is returned below
         // with FAILURE; the deferred owner remains responsible for its frame.
-        this->log_WARNING_HI_TransmitBusyDeferred();
+        this->log_WARNING_HI_SendFailed(-1);
     } else {
-        this->log_WARNING_HI_RadioNotReady();
+        this->log_WARNING_HI_SendFailed(-1);
     }
     this->dataReturnOut_out(0, data, context);
     if (this->isConnected_comStatusOut_OutputPort(0)) {
@@ -196,14 +182,13 @@ void Rfm69Manager ::initializeRadio() {
         if (this->detectRadio()) {
             this->m_state = CONFIGURE;
         } else {
-            this->log_WARNING_HI_RadioNotDetected();
+            this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
             return;
         }
     }
     if (this->m_state == CONFIGURE) {
         if (this->configureRadio() && this->setMode(Mode::RX)) {
             this->m_state = READY;
-            this->log_ACTIVITY_HI_RadioConfigured();
             // Com status is a one-time startup handshake. Sending an extra
             // SUCCESS after a hardware reset is invalid while the downstream
             // aggregator is already READY and causes it to assert.
@@ -224,14 +209,15 @@ bool Rfm69Manager ::transmitFrame(Fw::Buffer& data) {
     // radio segmentation or reassembly contract.
     const FwSizeType size = data.getSize();
     if ((size == 0) || (size > MAX_PACKET_PAYLOAD)) {
-        this->log_WARNING_HI_FrameTooLarge(static_cast<U32>(size));
+        this->log_WARNING_HI_SendFailed(static_cast<I32>(size));
         return false;
     }
     const bool success = this->transmitPacket(data.getData(), size);
     if (!success) {
-        this->m_transmitFailures++;
-        this->log_WARNING_HI_TransmitFailed();
-        this->tlmWrite_TransmitFailures(this->m_transmitFailures);
+        this->log_WARNING_HI_SendFailed(-1);
+    } else {
+        this->log_WARNING_HI_ConfigurationFailed_ThrottleClear();
+        this->log_WARNING_HI_SendFailed_ThrottleClear();
     }
     return success;
 }
@@ -297,8 +283,6 @@ void Rfm69Manager ::TRANSMIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, Rfm69::
             this->finishDeferredTransmit(Fw::Success::SUCCESS);
         }
     }
-    this->tlmWrite_TransmitEnabled(enabled);
-    this->log_ACTIVITY_HI_TransmitStateChanged(enabled);
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
 
@@ -312,7 +296,6 @@ void Rfm69Manager ::RESET_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
         if (this->pulseReset()) {
             this->m_resetPulsed = true;
             this->m_state = DETECT;
-            this->log_ACTIVITY_HI_RadioReset();
             response = Fw::CmdResponse::OK;
         }
     }
@@ -333,7 +316,6 @@ bool Rfm69Manager ::pulseReset() {
         (void)Os::Task::delay(Fw::TimeInterval(0, 10000));
         return true;
     }
-    this->log_WARNING_HI_ResetFailed(static_cast<U8>(status));
     return false;
 }
 
@@ -358,13 +340,12 @@ void Rfm69Manager ::pollReceive() {
         this->updateRssi();
         const FwSizeType size = this->readReceivedPacket(payload, sizeof payload);
         if (size == 0) {
-            this->log_WARNING_HI_ReceiveFailed();
             break;
         }
         Fw::Buffer buffer = this->allocate_out(0, size);
         if (buffer.getSize() < size) {
             // Packet already drained from the radio; drop it
-            this->log_WARNING_HI_BufferAllocationFailed();
+            this->log_WARNING_HI_AllocationFailed(size);
             this->deallocate_out(0, buffer);
             continue;
         }
