@@ -81,11 +81,8 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! RESET pulses RST and returns the radio to READY without a process restart
     void test_reset_recovery();
 
-    //! Listen-before-talk: transmission deferred during a reception (REQ-013)
-    void test_transmit_deferred();
-
-    //! Disabling transmit cancels, rather than later transmits, a deferred frame
-    void test_transmit_deferred_disabled();
+    //! Half-duplex: TX while RX is in progress is dropped immediately
+    void test_transmit_dropped_when_busy();
 
     //! Transmission before the radio is ready (REQ-012)
     void test_transmit_not_ready();

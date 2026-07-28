@@ -33,7 +33,7 @@ FSK, 25 kHz deviation, sync `2D A7…`, `PacketConfig1=0xD0`). Maps live in
 
 - Lifecycle: `DETECT` → `CONFIGURE` → `READY` on `run`; params/`RESET` re-enter configure or detect.
 - Radio accepts **1–255** byte payloads; rejects 0 and >255 via `SendFailed` (no segmentation). Reference GDS/ground-station path uses **255-byte** records — see `GroundStationRadioHead/gds/README.md`.
-- At most one deferred TX while RX is in progress (listen-before-talk).
+- Dumb half-duplex: if RX is in progress, downlink TX is dropped (`SendFailed`); no deferred queue.
 - TX/RX waits use airtime from `DATA_RATE` + 75 ms margin; failures recover to RX.
 - `DBM_20` enables PA boost only during TX.
 
@@ -49,7 +49,7 @@ FSK, 25 kHz deviation, sync `2D A7…`, `PacketConfig1=0xD0`). Maps live in
 | 006 | Return every Com buffer once with status | UT |
 | 007 | Poll, deliver, recover RX | UT + HIL |
 | 008 | Bound waits; recover to RX on failure | UT + HIL |
-| 009 | Defer at most one TX during RX | UT |
+| 009 | Drop TX while RX is in progress (no queue) | UT |
 | 010 | `TRANSMIT DISABLED` blocks downlink only | UT + HIL |
 | 011 | `RESET` re-inits without process restart | UT + HIL |
 | 012 | Telemeter TX/RX packet counts and `LastRssi` | UT + GDS |

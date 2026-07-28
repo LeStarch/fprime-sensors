@@ -95,17 +95,11 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Copy the DATA_RATE, BANDWIDTH_RX, and TX_POWER FPP parameter values into members
     void applyParameters();
 
-    //! Return a deferred Com buffer and report its final status exactly once
-    void finishDeferredTransmit(Fw::Success status);
-
     //! Poll for and deliver received packets
     void pollReceive();
 
     //! Request a reset pulse from the platform GPIO driver, if connected.
     bool pulseReset();
-
-    //! Transmit a deferred frame once the channel clears
-    void retryDeferredTransmit();
 
     //! Transmit exactly one native RF packet; reject zero or >255-byte frames
     bool transmitFrame(Fw::Buffer& data);
@@ -143,7 +137,7 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Deadline for a packet of the supplied payload length at active DATA_RATE
     U32 packetDeadlineUsec(FwSizeType payloadBytes) const;
 
-    //! \brief Listen-before-talk: true when a reception is in progress
+    //! \brief True when a reception is in progress (drop TX rather than queue)
     bool channelBusy();
 
     //! \brief Burst-write a block of payload bytes into the FIFO
@@ -189,11 +183,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     TransmitState m_transmitEnabled;  //!< Whether downlink transmit is permitted
     bool m_resetPulsed;                //!< True once a reset pulse has been issued
     bool m_comStatusAnnounced;          //!< Initial link-ready status has been sent
-
-    //! Frame deferred by listen-before-talk awaiting a clear channel
-    Fw::Buffer m_deferredBuffer;
-    ComCfg::FrameContext m_deferredContext;
-    bool m_deferredValid;
 
     //! Scratch buffers for SPI transactions (address byte + length + payload)
     U8 m_mosi[MAX_PACKET_PAYLOAD + 2];

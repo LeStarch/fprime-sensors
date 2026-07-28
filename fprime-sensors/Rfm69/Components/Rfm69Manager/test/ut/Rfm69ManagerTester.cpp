@@ -412,7 +412,7 @@ void Rfm69ManagerTester ::test_reset_recovery() {
     ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), sizeof data);
 }
 
-void Rfm69ManagerTester ::test_transmit_deferred() {
+void Rfm69ManagerTester ::test_transmit_dropped_when_busy() {
     this->makeReady();
     // A reception in progress: SyncAddressMatch is asserted by the model
     U8 uplink[40];
@@ -421,52 +421,23 @@ void Rfm69ManagerTester ::test_transmit_deferred() {
     }
     this->m_model.injectAirData(uplink, sizeof uplink);
 
-    // Listen-before-talk defers the transmission: no status, no buffer return
+    // Dumb half-duplex: drop the downlink immediately (no deferred retry)
     U8 data[32] = {0xA5};
     Fw::Buffer buffer(data, sizeof data);
     ComCfg::FrameContext context;
     this->invoke_to_dataIn(0, buffer, context);
-    ASSERT_from_comStatusOut_SIZE(0);
-    ASSERT_from_dataReturnOut_SIZE(0);
+    ASSERT_EVENTS_SendFailed_SIZE(1);
+    ASSERT_EVENTS_SendFailed(0, -1);
+    ASSERT_from_comStatusOut_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
+    ASSERT_from_dataReturnOut_SIZE(1);
     U8 transmitted[MAX_PACKET_PAYLOAD + 1];
     ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
 
-    // The next run tick drains the reception, then retries the transmission
+    // The next run tick still delivers the uplink
     this->invoke_to_run(0, 0);
     ASSERT_from_dataOut_SIZE(1);
-    ASSERT_from_comStatusOut_SIZE(1);
-    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
-    ASSERT_from_dataReturnOut_SIZE(1);
-    ASSERT_TLM_PacketsTransmitted(0, 1);
-    const FwSizeType size = this->m_model.retrievePacket(transmitted, sizeof transmitted);
-    ASSERT_EQ(size, sizeof data);
-}
-
-void Rfm69ManagerTester ::test_transmit_deferred_disabled() {
-    this->makeReady();
-    U8 uplink[40] = {0};
-    this->m_model.injectAirData(uplink, sizeof uplink);
-
-    U8 data[32] = {0xA5};
-    Fw::Buffer buffer(data, sizeof data);
-    ComCfg::FrameContext context;
-    this->invoke_to_dataIn(0, buffer, context);
-    ASSERT_from_comStatusOut_SIZE(0);
-    ASSERT_from_dataReturnOut_SIZE(0);
-
-    // A receive-only command must release the held frame and prevent it from
-    // being sent when the in-progress reception finishes.
-    this->sendCmd_TRANSMIT(0, 0, Rfm69::TransmitState::DISABLED);
-    ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_TRANSMIT, 0, Fw::CmdResponse::OK);
-    ASSERT_from_comStatusOut_SIZE(1);
-    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
-    ASSERT_from_dataReturnOut_SIZE(1);
-
-    this->clearHistory();
-    this->invoke_to_run(0, 0);
-    ASSERT_from_dataOut_SIZE(1);
-    U8 transmitted[MAX_PACKET_PAYLOAD];
-    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), 0);
+    ASSERT_TLM_PacketsTransmitted_SIZE(0);
 }
 
 void Rfm69ManagerTester ::test_transmit_not_ready() {

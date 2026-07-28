@@ -38,9 +38,6 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_transmitEnabled(TransmitState::ENABLED),
       m_resetPulsed(false),
       m_comStatusAnnounced(false),
-      m_deferredBuffer(),
-      m_deferredContext(),
-      m_deferredValid(false),
       m_mosi{},
       m_miso{} {}
 
@@ -64,9 +61,6 @@ void Rfm69Manager ::applyParameters() {
 }
 
 void Rfm69Manager ::requestReconfigure() {
-    // The radio will leave READY while registers are rewritten. Return a held
-    // Com buffer with failure rather than silently losing ownership.
-    this->finishDeferredTransmit(Fw::Success::FAILURE);
     if (this->m_state == DETECT) {
         return;
     }
@@ -119,27 +113,13 @@ void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const 
     Os::ScopeLock lock(this->m_lock);
     Fw::Success status = Fw::Success::FAILURE;
     if (this->m_transmitEnabled == TransmitState::DISABLED) {
-        // Commandable receive-only window: keep the radio in RX and drop the
-        // downlink frame, but report success so Com flow control keeps moving.
+        // Receive-only window: drop downlink, keep Com flow control moving.
         status = Fw::Success::SUCCESS;
-    } else if ((this->m_state == READY) && !this->m_deferredValid) {
-        // Listen-before-talk: defer the frame while a reception is in
-        // progress; the run handler retries once the channel clears. The
-        // buffer and com status are held until then, back-pressuring the
-        // framer's com queue.
-        if (this->channelBusy()) {
-            this->m_deferredBuffer = data;
-            this->m_deferredContext = context;
-            this->m_deferredValid = true;
-            return;
-        }
+    } else if ((this->m_state == READY) && !this->channelBusy()) {
+        // Dumb half-duplex: TX only when idle. If RX is in progress, drop below.
         if (this->transmitFrame(data)) {
             status = Fw::Success::SUCCESS;
         }
-    } else if ((this->m_state == READY) && this->m_deferredValid) {
-        // Keep exactly one deferred frame. The new frame is returned below
-        // with FAILURE; the deferred owner remains responsible for its frame.
-        this->log_WARNING_HI_SendFailed(-1);
     } else {
         this->log_WARNING_HI_SendFailed(-1);
     }
@@ -157,7 +137,6 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     Os::ScopeLock lock(this->m_lock);
     if (this->m_state == READY) {
         this->pollReceive();
-        this->retryDeferredTransmit();
     } else {
         this->initializeRadio();
     }
@@ -221,52 +200,6 @@ bool Rfm69Manager ::transmitFrame(Fw::Buffer& data) {
     return success;
 }
 
-void Rfm69Manager ::finishDeferredTransmit(Fw::Success status) {
-    if (!this->m_deferredValid) {
-        return;
-    }
-    // Clear the state before invoking downstream ports: their synchronous
-    // callbacks may cause a new frame to arrive as soon as this lock releases.
-    Fw::Buffer buffer = this->m_deferredBuffer;
-    const ComCfg::FrameContext context = this->m_deferredContext;
-    this->m_deferredValid = false;
-    this->m_deferredBuffer = Fw::Buffer();
-    this->m_deferredContext = ComCfg::FrameContext();
-    this->dataReturnOut_out(0, buffer, context);
-    if (this->isConnected_comStatusOut_OutputPort(0)) {
-        this->comStatusOut_out(0, status);
-    }
-}
-
-void Rfm69Manager ::retryDeferredTransmit() {
-    if (!this->m_deferredValid) {
-        return;
-    }
-    // TRANSMIT(DISABLED) is a receive-only window. A frame that happened to
-    // be deferred immediately before the command must not escape later when
-    // the channel goes idle.
-    if (this->m_transmitEnabled == TransmitState::DISABLED) {
-        this->finishDeferredTransmit(Fw::Success::SUCCESS);
-        return;
-    }
-    if (this->channelBusy()) {
-        return;
-    }
-    Fw::Buffer buffer = this->m_deferredBuffer;
-    const ComCfg::FrameContext context = this->m_deferredContext;
-    this->m_deferredValid = false;
-    this->m_deferredBuffer = Fw::Buffer();
-    this->m_deferredContext = ComCfg::FrameContext();
-    Fw::Success status = Fw::Success::FAILURE;
-    if (this->transmitFrame(buffer)) {
-        status = Fw::Success::SUCCESS;
-    }
-    this->dataReturnOut_out(0, buffer, context);
-    if (this->isConnected_comStatusOut_OutputPort(0)) {
-        this->comStatusOut_out(0, status);
-    }
-}
-
 // ----------------------------------------------------------------------
 // Command handler implementations
 // ----------------------------------------------------------------------
@@ -275,12 +208,6 @@ void Rfm69Manager ::TRANSMIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, Rfm69::
     {
         Os::ScopeLock lock(this->m_lock);
         this->m_transmitEnabled = enabled;
-        if (enabled == TransmitState::DISABLED) {
-            // Match the behavior for a newly received disabled frame: drop
-            // the held frame without RF transmission and release Com flow
-            // control immediately.
-            this->finishDeferredTransmit(Fw::Success::SUCCESS);
-        }
     }
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
 }
@@ -289,9 +216,7 @@ void Rfm69Manager ::RESET_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
     Fw::CmdResponse response = Fw::CmdResponse::EXECUTION_ERROR;
     {
         Os::ScopeLock lock(this->m_lock);
-        // Return a pending downlink buffer before changing hardware state. The
-        // next scheduler tick performs the normal detect/configure sequence.
-        this->finishDeferredTransmit(Fw::Success::FAILURE);
+        // Next scheduler tick performs the normal detect/configure sequence.
         if (this->pulseReset()) {
             this->m_resetPulsed = true;
             this->m_state = DETECT;

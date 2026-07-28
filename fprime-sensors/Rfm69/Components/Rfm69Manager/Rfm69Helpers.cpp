@@ -189,8 +189,7 @@ bool Rfm69Manager ::setPowerBoost(bool enabled) {
 }
 
 bool Rfm69Manager ::channelBusy() {
-    // Listen-before-talk: SyncAddressMatch indicates the radio is actively
-    // clocking in a packet (datasheet section 6, RegIrqFlags1)
+    // SyncAddressMatch: an uplink is being clocked in; TX must drop (half-duplex).
     U8 flags = 0;
     if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
         return false;

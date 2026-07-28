@@ -69,14 +69,9 @@ TEST(Nominal, ResetRecovery) {
     tester.test_reset_recovery();
 }
 
-TEST(Nominal, TransmitDeferred) {
+TEST(OffNominal, TransmitDroppedWhenBusy) {
     Rfm69::Rfm69ManagerTester tester;
-    tester.test_transmit_deferred();
-}
-
-TEST(Nominal, TransmitDeferredDisabled) {
-    Rfm69::Rfm69ManagerTester tester;
-    tester.test_transmit_deferred_disabled();
+    tester.test_transmit_dropped_when_busy();
 }
 
 TEST(Nominal, Receive) {
