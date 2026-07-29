@@ -7,7 +7,7 @@ module Rfm69 {
     @ configuration layer. The topology and manager only use F' ports.
     instance spiDriver: Drv.LinuxSpiDriver base id Rfm69.SubtopologyConfig.BASE_ID + 0x00002000 {
         phase Fpp.ToCpp.Phases.configComponents """
-        if (not Rfm69::spiDriver.open(0, 1, Drv::SPI_FREQUENCY_1MHZ,
+        if (not Rfm69::spiDriver.open(0, 1, Drv::SPI_FREQUENCY_5MHZ,
                                       Drv::SPI_MODE_CPOL_LOW_CPHA_LOW)) {
             Fw::Logger::log("[ERROR] RFM69 SPI open failed\\n");
         }

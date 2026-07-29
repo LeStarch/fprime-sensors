@@ -8,6 +8,7 @@
 // ======================================================================
 
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Manager.hpp"
+#include <cstring>
 
 namespace Rfm69 {
 

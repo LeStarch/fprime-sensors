@@ -4,6 +4,7 @@
 // ======================================================================
 
 #include "fprime-sensors/Rfm69/Components/Rfm69Sim/Rfm69Sim.hpp"
+#include <cstring>
 
 namespace Rfm69 {
 

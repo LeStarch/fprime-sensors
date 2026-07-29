@@ -7,6 +7,7 @@
 // ======================================================================
 
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Manager.hpp"
+#include <cstring>
 
 namespace Rfm69 {
 
@@ -142,7 +143,7 @@ bool Rfm69Manager ::transmitFrame(Fw::Buffer& data) {
 // Command handler implementations
 // ----------------------------------------------------------------------
 
-void Rfm69Manager ::TRANSMIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, Rfm69::TransmitState enabled) {
+void Rfm69Manager ::TRANSMIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, const Rfm69::TransmitState& enabled) {
     {
         Os::ScopeLock lock(this->m_lock);
         this->m_transmitEnabled = enabled;

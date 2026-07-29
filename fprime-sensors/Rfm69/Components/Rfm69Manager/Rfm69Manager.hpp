@@ -67,7 +67,7 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Handler for the TRANSMIT command: enable/disable downlink
     void TRANSMIT_cmdHandler(FwOpcodeType opCode,     //!< The command opcode
                              U32 cmdSeq,              //!< The command sequence number
-                             Rfm69::TransmitState enabled  //!< Desired transmit state
+                             const Rfm69::TransmitState& enabled  //!< Desired transmit state
                              ) override;
 
     //! Handler for RESET: pulse hardware RST and reinitialize the radio
