@@ -37,8 +37,8 @@ module Rfm69 {
     }
 
     @ Controls whether the radio may leave receive mode to downlink.
-    @ DISABLING is intentionally omitted: this passive component completes
-    @ disable synchronously and returns to receive before command completion.
+    @ DISABLED: receive-only; downlink dataIn returns Com FAILURE (ComQueue pauses).
+    @ ENABLED: normal TX; re-enable emits Com SUCCESS to resume the queue.
     enum TransmitState : U8 {
         ENABLED
         DISABLED
@@ -86,10 +86,10 @@ module Rfm69 {
         # Parameters
         # ----------------------------------------------------------------------
 
-        @ Classical FSK bit rate; default is the hardware-validated 9.6 kb/s.
+        @ Classical FSK bit rate; default is the next step above 9.6 kb/s.
         @ Explicit IDs preserve stored parameter compatibility after old
-        @ fixed-profile parameters were removed.
-        param DATA_RATE: Rfm69DataRate default Rfm69DataRate.BR_9600 id 0
+        @ fixed-profile parameters were removed. Ground Station must match.
+        param DATA_RATE: Rfm69DataRate default Rfm69DataRate.BR_19200 id 0
 
         @ FSK receive/AFC filter bandwidth; default matches the ground-station image.
         param BANDWIDTH_RX: Rfm69Bandwidth default Rfm69Bandwidth.BW_500_KHZ id 1
@@ -132,6 +132,11 @@ module Rfm69 {
 
         @ RF packets delivered on dataOut
         telemetry PacketsReceived: U32
+
+        @ RX frames dropped for failing hardware CRC (noise / corrupted uplink).
+        @ A counter, not an event: corrupted frames are expected on a lossy link
+        @ and must not spam WARNING events onto the downlink or the soak gate.
+        telemetry RxCrcErrors: U32
 
         @ RSSI of last received packet (dBm)
         telemetry LastRssi: F32

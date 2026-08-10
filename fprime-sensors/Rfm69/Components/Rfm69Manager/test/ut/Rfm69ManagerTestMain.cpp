@@ -29,9 +29,19 @@ TEST(Nominal, TransmitLarge) {
     tester.test_transmit_large();
 }
 
+TEST(Nominal, TransmitFifoFit) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_fifo_fit();
+}
+
 TEST(Nominal, ReceiveLarge) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_receive_large();
+}
+
+TEST(Nominal, ReceiveFifoFit) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_receive_fifo_fit();
 }
 
 TEST(Nominal, DefaultRegisterImage) {
@@ -44,9 +54,9 @@ TEST(Nominal, HighPowerBoostRecovery) {
     tester.test_high_power_boost_recovery();
 }
 
-TEST(OffNominal, InvalidDataRateFallsBackToDefault) {
+TEST(Nominal, DataRateRegisterMap) {
     Rfm69::Rfm69ManagerTester tester;
-    tester.test_invalid_data_rate_falls_back_to_default();
+    tester.test_data_rate_register_map();
 }
 
 TEST(Nominal, BandwidthUpdateReconfigure) {
@@ -107,6 +117,11 @@ TEST(OffNominal, TransmitTimeoutRecovery) {
 TEST(OffNominal, ReceiveAllocationFailure) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_receive_allocation_failure();
+}
+
+TEST(OffNominal, ReceiveCrcDrop) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_receive_crc_drop();
 }
 
 TEST(Nominal, TransmitDisabled) {

@@ -111,14 +111,27 @@ constexpr U8 SPI_ADDRESS_MASK = 0x7F;
 constexpr U8 VERSION_VALUE = 0x24;
 //! Hardware FIFO size in bytes (datasheet section 5.2.2.2)
 constexpr FwSizeType FIFO_SIZE = 66;
-//! FIFO threshold programmed into RegFifoThresh (FifoLevel trip point)
-constexpr U8 FIFO_THRESHOLD = 0x0F;
-//! RFM69 variable-length packet payload maximum. Packets above the 66-byte
-//! hardware FIFO are streamed while in flight.
+//! FIFO threshold programmed into RegFifoThresh (FifoLevel trip point).
+//! A half-full watermark leaves about 13 ms at 19.2 kbps to service a TX
+//! top-up, instead of the roughly 6 ms available with the reset value of 15.
+constexpr U8 FIFO_THRESHOLD = 0x20;
+//! Maximum payload bytes read from the FIFO per 1 kHz scheduler tick. Raspberry
+//! Pi SPI0 corrupts the fourth data byte of longer FIFO read transactions on the
+//! reference wiring, so readFifo() splits this into two three-byte transfers.
+//! Six bytes/tick still drains faster than the maximum supported 38.4 kbps
+//! (4.8 bytes/ms) without placing a long ioctl loop in the rate group.
+constexpr FwSizeType RX_FIFO_DRAIN_CHUNK = 6;
+//! Maximum FIFO data bytes in one SPI transaction on the reference wiring.
+constexpr FwSizeType RX_FIFO_SPI_CHUNK = 3;
+//! Max payload that fits with the length byte in one FIFO fill (no TX top-up /
+//! no multi-tick RX stream). Variable-length mode: 1 length + N payload ≤ 66.
+constexpr FwSizeType FIFO_FIT_PAYLOAD = FIFO_SIZE - 1;
+//! RFM69 variable-length packet payload maximum. Packets above FIFO_FIT_PAYLOAD
+//! are streamed on FifoLevel while in flight (datasheet 5.2.2.3).
 constexpr FwSizeType MAX_PACKET_PAYLOAD = 255;
-//! Bytes safe to burst-write into the FIFO while FifoLevel reads clear
-//! (FIFO_SIZE less the threshold, with margin)
-constexpr FwSizeType TX_TOP_UP_CHUNK = 48;
+//! Bytes safe to burst-write while FifoLevel reads clear. At most
+//! FIFO_THRESHOLD bytes remain, so this fills to at most 64 of 66 bytes.
+constexpr FwSizeType TX_TOP_UP_CHUNK = FIFO_SIZE - FIFO_THRESHOLD - 2;
 //! Frf register step size: 32 MHz crystal / 2^19 (datasheet section 4.2.4)
 constexpr U32 CRYSTAL_HZ = 32000000;
 constexpr U32 FRF_DIVISOR = 524288;  //!< 2^19
@@ -208,7 +221,7 @@ constexpr PacketProfile NATIVE_PACKET_PROFILE = {
     4,
     {0x2D, 0xA7, 0x5C, 0x39, 0xD1, 0x6E, 0x84, 0xF2},
     0xD0,  // PacketFormat=variable, DcFree=whitening, CrcOn; AES/unlimited off
-    0x0F,  // FifoThresh; configureRadio ORs TxStartCondition → RegFifoThresh=0x8F
+    FIFO_THRESHOLD,  // configureRadio ORs TxStartCondition → RegFifoThresh=0xA0
     0x02,  // AutoRxRestartOn
     0x30,
 };

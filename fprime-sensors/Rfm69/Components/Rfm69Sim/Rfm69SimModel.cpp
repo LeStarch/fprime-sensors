@@ -22,6 +22,7 @@ Rfm69SimModel::Rfm69SimModel()
       m_rxActive(false),
       m_rxTotal(0),
       m_rxDelivered(0),
+      m_rxCorrupt(false),
       m_airCount(0),
       m_txCount(0) {
     this->reset();
@@ -68,6 +69,7 @@ void Rfm69SimModel::reset() {
     this->m_rxActive = false;
     this->m_rxTotal = 0;
     this->m_rxDelivered = 0;
+    this->m_rxCorrupt = false;
     this->m_airCount = 0;
     this->m_txCount = 0;
 }
@@ -116,6 +118,29 @@ void Rfm69SimModel::injectAirData(const U8* data, FwSizeType size) {
     (void)::memcpy(&this->m_airBuffer[this->m_airCount], data, size);
     this->m_airCount += size;
     this->startReceive();
+}
+
+void Rfm69SimModel::injectCorruptFrame(U8 payloadLen) {
+    // Only stage when the radio is idle in RX (mirrors startReceive() guards).
+    if (((this->m_registers[Reg::OP_MODE] & Mode::MASK) != Mode::RX) || this->m_rxActive ||
+        this->m_payloadReady || this->m_rxRestartPending || (this->m_fifoCount != 0)) {
+        return;
+    }
+    // Cap so length byte + payload + trailing noise fits m_rxPacket.
+    if (payloadLen > (MAX_PACKET_PAYLOAD - 40)) {
+        payloadLen = static_cast<U8>(MAX_PACKET_PAYLOAD - 40);
+    }
+    // Trailing noise keeps FifoLevel asserted through the manager's final read so
+    // the declared byte count completes without ever waiting on PayloadReady.
+    const FwSizeType noise = 32;
+    this->m_rxPacket[0] = payloadLen;
+    for (FwSizeType i = 1; i <= static_cast<FwSizeType>(payloadLen) + noise; i++) {
+        this->m_rxPacket[i] = static_cast<U8>(0xA5 ^ i);
+    }
+    this->m_rxTotal = static_cast<FwSizeType>(payloadLen) + 1 + noise;
+    this->m_rxDelivered = 0;
+    this->m_rxActive = true;
+    this->m_rxCorrupt = true;
 }
 
 FwSizeType Rfm69SimModel::retrievePacket(U8* data, FwSizeType capacity) {
@@ -193,7 +218,11 @@ void Rfm69SimModel::advanceClock(FwSizeType byteTimes) {
                 this->m_rxDelivered++;
                 if (this->m_rxDelivered >= this->m_rxTotal) {
                     this->m_rxActive = false;
-                    this->m_payloadReady = true;
+                    // A CRC-failing frame never asserts PayloadReady (the RFM69
+                    // auto-clears on CRC failure). Leave the streamed bytes in
+                    // the FIFO so FifoLevel stays asserted through the final read,
+                    // exercising the manager's "completed without CRC" drop path.
+                    this->m_payloadReady = !this->m_rxCorrupt;
                 }
             }
         }
@@ -340,6 +369,7 @@ void Rfm69SimModel::startReceive() {
     this->m_rxTotal = payloadSize + 1;
     this->m_rxDelivered = 0;
     this->m_rxActive = true;
+    this->m_rxCorrupt = false;
     (void)::memmove(this->m_airBuffer, &this->m_airBuffer[payloadSize], this->m_airCount - payloadSize);
     this->m_airCount -= payloadSize;
 }

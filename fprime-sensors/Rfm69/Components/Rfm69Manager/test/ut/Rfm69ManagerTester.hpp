@@ -17,8 +17,8 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     // Maximum size of histories storing events, telemetry, and port outputs.
     // Streamed 255-byte packets are drained through many small SPI
     // transactions, each of which lands in the port history.
-    //! Large enough for a full TX_POLL_LIMIT stall plus configure / setup SPI
-    static const U32 MAX_HISTORY_SIZE = 20000;
+    //! Large enough for a slow-rate scheduler-driven TX plus configure/setup SPI.
+    static const U32 MAX_HISTORY_SIZE = 50000;
 
     // Instance ID supplied to the component instance under test
     static const FwEnumStoreType TEST_INSTANCE_ID = 0;
@@ -58,8 +58,14 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! Maximum-size (255-byte) packet streamed through the FIFO (REQ-004)
     void test_transmit_large();
 
+    //! FIFO-fit payload (65 B): single standby fill, no in-TX top-up
+    void test_transmit_fifo_fit();
+
     //! Maximum-size (255-byte) packet received through the FIFO (REQ-006)
     void test_receive_large();
+
+    //! FIFO-fit payload received in one PayloadReady drain
+    void test_receive_fifo_fit();
 
     //! Default enum values program the canonical flight/ground register image
     void test_default_register_image();
@@ -67,8 +73,8 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! DBM_20 uses TestPa boost only for a TX and restores safe RX values
     void test_high_power_boost_recovery();
 
-    //! An invalid DATA_RATE serialization resolves to the FPP declared default
-    void test_invalid_data_rate_falls_back_to_default();
+    //! Every exposed data-rate enum maps to the intended bitrate register
+    void test_data_rate_register_map();
 
     //! A live BANDWIDTH_RX parameter update schedules and completes reconfiguration
     void test_bandwidth_update_reconfigure();
@@ -100,6 +106,9 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! Reception with buffer allocation failure (REQ-011)
     void test_receive_allocation_failure();
 
+    //! A CRC-failing frame is dropped, counted, and never forwarded downstream
+    void test_receive_crc_drop();
+
     //! Uplink buffer return path deallocates buffers
     void test_data_return();
 
@@ -125,6 +134,9 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
 
     //! Bring the component to the READY state
     void makeReady();
+
+    //! Advance run ticks until a staged TX reports SUCCESS or FAILURE.
+    void runUntilTransmitCompletes(U32 maxTicks = 4096);
 
     //! Seed the generated parameter source with the canonical default profile
     void setDefaultParameters();

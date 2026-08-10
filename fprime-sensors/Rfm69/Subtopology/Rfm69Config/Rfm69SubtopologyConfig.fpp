@@ -7,7 +7,10 @@ module Rfm69 {
     @ configuration layer. The topology and manager only use F' ports.
     instance spiDriver: Drv.LinuxSpiDriver base id Rfm69.SubtopologyConfig.BASE_ID + 0x00002000 {
         phase Fpp.ToCpp.Phases.configComponents """
-        if (not Rfm69::spiDriver.open(0, 1, Drv::SPI_FREQUENCY_5MHZ,
+        // The Pi/reference wiring shows intermittent MISO bit-7 sampling errors
+        // at 5 MHz after the RFM69 has already accepted the RF CRC. One MHz is
+        // comfortably inside the 1 kHz manager budget and is byte-exact in HIL.
+        if (not Rfm69::spiDriver.open(0, 1, Drv::SPI_FREQUENCY_1MHZ,
                                       Drv::SPI_MODE_CPOL_LOW_CPHA_LOW)) {
             Fw::Logger::log("[ERROR] RFM69 SPI open failed\\n");
         }

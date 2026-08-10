@@ -14,10 +14,10 @@ because the chip FIFO is only 66 bytes).
 
 | Kind | Name | Notes |
 | --- | --- | --- |
-| Param | `DATA_RATE` | Default `BR_9600` |
+| Param | `DATA_RATE` | Default `BR_19200` |
 | Param | `BANDWIDTH_RX` | Default `BW_500_KHZ` (RX/AFC filter) |
 | Param | `TX_POWER` | Default `DBM_13` |
-| Cmd | `TRANSMIT` | `ENABLED`/`DISABLED` (downlink only; RX stays on) |
+| Cmd | `TRANSMIT` | `ENABLED` / `DISABLED` (downlink only; RX stays on) |
 | Cmd | `RESET` | Optional RST GPIO, then detect/configure |
 | Event | `ConfigurationFailed` | Detect or configure/RX entry failed |
 | Event | `SendFailed` | TX rejected or failed |
@@ -26,15 +26,34 @@ because the chip FIFO is only 66 bytes).
 
 All other modem settings are fixed in `NATIVE_PACKET_PROFILE` / helpers (915 MHz
 FSK, 25 kHz deviation, sync `2D A7…`, `PacketConfig1=0xD0`). Maps live in
-`Rfm69Radio.hpp`. Default flight/ground-station image: `BR_9600` + `BW_500_KHZ` +
+`Rfm69Radio.hpp`. Default flight/ground-station image: `BR_19200` + `BW_500_KHZ` +
 `DBM_13`. Changing rate/BW on flight requires a matching ground-station rebuild.
 
 ## Behavior
 
-- Lifecycle: `DETECT` → `CONFIGURE` → `READY` on `run`; params/`RESET` re-enter configure or detect.
-- Radio accepts **1–255** byte payloads; rejects 0 and >255 via `SendFailed` (no segmentation). Reference GDS/ground-station path uses **255-byte** records — see `GroundStationRadioHead/gds/README.md`.
-- Dumb half-duplex: if RX is in progress, downlink TX is dropped (`SendFailed`); no deferred queue.
-- TX/RX waits use fixed poll limits; failures recover to RX.
+- Lifecycle: `DETECT` → `CONFIGURE` → `READY` during `parametersLoaded` (before rate
+  groups). An optional hardware RST pulse is attempted once when a reset GPIO is
+  connected (recommended after power-up); bring-up continues even if the pulse is
+  skipped or fails. `run` polls RX when `READY` and retries init after `RESET`/param
+  changes. While downlink TX holds the bus, `run` skips the tick (try-lock) so a
+  1 kHz rate group is not stalled for RF airtime. While a packet is open, each
+  tick drains at most one FifoLevel watermark (or the PayloadReady CRC-pass
+  tail) so SyncAddressMatch is not cleared by emptying the FIFO early. Sync+FIFO
+  without FifoLevel is waited out (real uplink ramp); only after
+  `RX_STALE_SYNC_TICKS` is the receiver re-armed.
+- Radio accepts **1–255** byte payloads; rejects 0 and >255 via `SendFailed` (no segmentation).
+  The hardware FIFO is 66 bytes: payloads ≤65 B are a single standby fill / single
+  PayloadReady drain; larger payloads stream on `FifoLevel` (TX top-up /
+  RX multi-read). Ground Station + GDS use variable-length CCSDS Space Packets
+  over UART/RF (`raw-space-packet`); see `GroundStationRadioHead/README.md`.
+- Mute / half-duplex: `TRANSMIT DISABLED`, RX-busy / post-RX holdoff, and failed TX report Com
+  `FAILURE` so `Svc::ComQueue` pauses and retains downlink. Re-enable emits `SUCCESS`; after
+  holdoff/fail, `run` emits `SUCCESS` once the radio can TX again.
+- After each completed uplink packet, downlink is deferred for `RX_TX_HOLDOFF_TICKS`
+  (~120 ms) for RF turnaround; sized so GDS file-uplink cooldown (~0.45 s) still
+  leaves a window for TM/events before the next ground chunk.
+- TX/RX waits use fixed poll limits (`TX_POLL_LIMIT` sized for 255 B @ BR_19200
+  with margin); failures recover to RX.
 - `DBM_20` enables PA boost only during TX.
 
 ## Requirements
@@ -49,8 +68,8 @@ FSK, 25 kHz deviation, sync `2D A7…`, `PacketConfig1=0xD0`). Maps live in
 | 006 | Return every Com buffer once with status | UT |
 | 007 | Poll, deliver, recover RX | UT + HIL |
 | 008 | Bound waits; recover to RX on failure | UT + HIL |
-| 009 | Drop TX while RX is in progress (no queue) | UT |
-| 010 | `TRANSMIT DISABLED` blocks downlink only | UT + HIL |
+| 009 | Defer TX with Com `FAILURE` while RX is in progress | UT |
+| 010 | `TRANSMIT DISABLED` pauses downlink via Com `FAILURE`; re-enable resumes | UT + HIL |
 | 011 | `RESET` re-inits without process restart | UT + HIL |
 | 012 | Telemeter TX/RX packet counts and `LastRssi` | UT + GDS |
 

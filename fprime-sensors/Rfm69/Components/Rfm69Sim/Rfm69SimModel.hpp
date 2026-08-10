@@ -44,6 +44,13 @@ class Rfm69SimModel {
     //! Inject bytes arriving over the simulated air interface (uplink)
     void injectAirData(const U8* data, FwSizeType size);
 
+    //! Inject a frame that fails the hardware CRC. The FIFO streams `payloadLen`
+    //! declared bytes with enough trailing noise that FifoLevel stays asserted
+    //! through the final read, but PayloadReady never asserts -- matching an
+    //! RFM69 with CrcOn + CrcAutoClear on a corrupted/noise frame. Used to verify
+    //! the manager drops such frames instead of forwarding them to the deframer.
+    void injectCorruptFrame(U8 payloadLen);
+
     //! Retrieve the next transmitted packet payload (downlink).
     //! \return payload size, or 0 when no packet is pending
     FwSizeType retrievePacket(U8* data, FwSizeType capacity);
@@ -124,6 +131,9 @@ class Rfm69SimModel {
     bool m_rxActive;
     FwSizeType m_rxTotal;
     FwSizeType m_rxDelivered;
+    //! When set, the in-progress reception is a CRC-failing frame: PayloadReady
+    //! is never asserted at completion (the RFM69 auto-clears on CRC failure).
+    bool m_rxCorrupt;
     U8 m_rxPacket[MAX_PACKET_PAYLOAD + 1];
 
     // Buffered uplink bytes awaiting packetization
