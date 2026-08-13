@@ -8,6 +8,8 @@
 // ======================================================================
 
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Manager.hpp"
+#include <Fw/Logger/Logger.hpp>
+#include <cstring>
 
 namespace Rfm69 {
 
@@ -46,37 +48,100 @@ bool Rfm69Manager ::detectRadio() {
 }
 
 bool Rfm69Manager ::configureRadio() {
+    // Read operator params at configure time (same pattern as LoRa enableRx/Tx).
+    // All other modem registers come from NATIVE_PACKET_PROFILE.
+    Fw::ParamValid isValid = Fw::ParamValid::INVALID;
+    const Rfm69DataRate dataRateParam = this->paramGet_DATA_RATE(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
+    const Rfm69Bandwidth bandwidthParam = this->paramGet_BANDWIDTH_RX(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
+    const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
+
+    DataRateSetting dataRate{};
+    BandwidthSetting bandwidth{};
+    TxPowerSetting power{};
+    if (!getDataRateSetting(dataRateParam, dataRate) || !getBandwidthSetting(bandwidthParam, bandwidth) ||
+        !getTxPowerSetting(txPowerParam, power)) {
+        return false;
+    }
+
+    // The manager is driven by a 1 kHz rate group. Scale SPI polling with the
+    // air rate: idle polls detect reception well before the 66-byte FIFO can
+    // fill, while active polls drain one watermark faster than bytes arrive.
+    // This avoids a blocking SPI ioctl on every 1 ms tick and prevents the
+    // ActiveRateGroup queue from backing up under normal Linux scheduling jitter.
+    if (dataRateParam == Rfm69DataRate::BR_38400) {
+        this->m_rxIdlePollDivisor = 4;
+        this->m_rxActivePollDivisor = 1;
+        this->m_txTimeoutTicks = 150;
+    } else if (dataRateParam == Rfm69DataRate::BR_19200) {
+        this->m_rxIdlePollDivisor = 8;
+        this->m_rxActivePollDivisor = 1;
+        this->m_txTimeoutTicks = 250;
+    } else if (dataRateParam == Rfm69DataRate::BR_9600) {
+        this->m_rxIdlePollDivisor = 16;
+        this->m_rxActivePollDivisor = 1;
+        this->m_txTimeoutTicks = 400;
+    } else if (dataRateParam == Rfm69DataRate::BR_4800) {
+        this->m_rxIdlePollDivisor = 32;
+        this->m_rxActivePollDivisor = 1;
+        this->m_txTimeoutTicks = 750;
+    } else {
+        this->m_rxIdlePollDivisor = 64;
+        this->m_rxActivePollDivisor = 1;
+        this->m_txTimeoutTicks = 3000;
+    }
+#ifdef __ZEPHYR__
+    // Zephyr GS owns SPI on the only bridge thread — poll every tick.
+    this->m_rxIdlePollDivisor = 1;
+    this->m_rxActivePollDivisor = 1;
+#endif
+    this->m_rxPollTicks = 0;
+
     // Frf register value: frequency / (32 MHz / 2^19) (datasheet section 4.2.4)
-    const U32 frf = static_cast<U32>((static_cast<U64>(this->m_frequencyHz) * FRF_DIVISOR) / CRYSTAL_HZ);
-    // Bit rate 55.555 kb/s and 50 kHz deviation: common RFM69 FSK settings
-    constexpr U16 BITRATE = 0x0240;  // 32 MHz / 55555 bps
-    constexpr U16 FDEV = 0x0333;     // 50 kHz / 61 Hz Fstep
+    const U32 frf = static_cast<U32>((static_cast<U64>(FIXED_FREQUENCY_HZ) * FRF_DIVISOR) / CRYSTAL_HZ);
+    const PacketProfile& packet = NATIVE_PACKET_PROFILE;
     const struct {
         U8 address;
         U8 value;
     } configuration[] = {
         {Reg::OP_MODE, Mode::STANDBY},  // Sequencer on, standby
-        {Reg::DATA_MODUL, 0x00},        // Packet mode, FSK, no shaping
-        {Reg::BITRATE_MSB, static_cast<U8>(BITRATE >> 8)},
-        {Reg::BITRATE_LSB, static_cast<U8>(BITRATE & 0xFF)},
-        {Reg::FDEV_MSB, static_cast<U8>(FDEV >> 8)},
-        {Reg::FDEV_LSB, static_cast<U8>(FDEV & 0xFF)},
+        {Reg::DATA_MODUL, FIXED_DATA_MODUL},  // Packet FSK, no shaping
+        {Reg::BITRATE_MSB, static_cast<U8>(dataRate.bitrateReg >> 8)},
+        {Reg::BITRATE_LSB, static_cast<U8>(dataRate.bitrateReg & 0xFF)},
+        {Reg::FDEV_MSB, static_cast<U8>(FIXED_FDEV_REGISTER >> 8)},
+        {Reg::FDEV_LSB, static_cast<U8>(FIXED_FDEV_REGISTER & 0xFF)},
         {Reg::FRF_MSB, static_cast<U8>(frf >> 16)},
         {Reg::FRF_MID, static_cast<U8>(frf >> 8)},
         {Reg::FRF_LSB, static_cast<U8>(frf & 0xFF)},
-        // RFM69HCW: PA1 on (PA0 is not connected on this module)
-        {Reg::PA_LEVEL, static_cast<U8>(0x40 | (this->m_powerLevel & 0x1F))},
-        {Reg::RX_BW, 0x55},                                          // Recommended default (Table 23)
-        {Reg::DIO_MAPPING_2, 0x07},                                  // CLKOUT off
-        {Reg::RSSI_THRESH, 0xE4},                                    // Recommended default
-        {Reg::SYNC_CONFIG, 0x88},                                    // Sync on, 2 sync bytes
-        {Reg::SYNC_VALUE_1, 0x2D},                                   // Fixed first sync byte
-        {Reg::SYNC_VALUE_2, this->m_networkId},                      // Network ID
-        {Reg::PACKET_CONFIG_1, 0x90},                                // Variable length, CRC on
-        {Reg::PAYLOAD_LENGTH, 0xFF},                                 // Max RX length: full 255-byte packets
-        {Reg::FIFO_THRESH, static_cast<U8>(0x80 | FIFO_THRESHOLD)},  // TX start on FifoNotEmpty
-        {Reg::PACKET_CONFIG_2, 0x02},                                // Auto RX restart
-        {Reg::TEST_DAGC, 0x30},                                      // Recommended default
+        {Reg::PA_LEVEL, power.paLevel},  // HCW PA1/PA2 selection and output
+        {Reg::OCP, Pa::OCP_NORMAL},
+        {Reg::RX_BW, bandwidth.rxBw},
+        {Reg::AFC_BW, bandwidth.afcBw},
+        {Reg::DIO_MAPPING_2, 0x07},  // CLKOUT off
+        {Reg::RSSI_THRESH, 0xE4},    // Recommended default
+        {Reg::PREAMBLE_MSB, static_cast<U8>(packet.preambleBytes >> 8)},
+        {Reg::PREAMBLE_LSB, static_cast<U8>(packet.preambleBytes & 0xFF)},
+        {Reg::SYNC_CONFIG, 0xB8},  // Sync on, 8 sync bytes
+        {Reg::SYNC_VALUE_1, packet.sync[0]},
+        {Reg::SYNC_VALUE_2, packet.sync[1]},
+        {Reg::SYNC_VALUE_3, packet.sync[2]},
+        {Reg::SYNC_VALUE_4, packet.sync[3]},
+        {Reg::SYNC_VALUE_5, packet.sync[4]},
+        {Reg::SYNC_VALUE_6, packet.sync[5]},
+        {Reg::SYNC_VALUE_7, packet.sync[6]},
+        {Reg::SYNC_VALUE_8, packet.sync[7]},
+        {Reg::PACKET_CONFIG_1, packet.packetConfig1},  // Variable length, whitening, CRC
+        {Reg::PAYLOAD_LENGTH, static_cast<U8>(MAX_PACKET_PAYLOAD)},
+        {Reg::FIFO_THRESH, static_cast<U8>(0x80 | packet.fifoThreshold)},
+        {Reg::PACKET_CONFIG_2, packet.packetConfig2},
+        {Reg::TEST_PA_1, Pa::TEST_PA_1_NORMAL},
+        {Reg::TEST_PA_2, Pa::TEST_PA_2_NORMAL},
+        {Reg::TEST_DAGC, packet.testDagc},  // Recommended default
     };
     for (FwSizeType i = 0; i < FW_NUM_ARRAY_ELEMENTS(configuration); i++) {
         if (this->writeRegister(configuration[i].address, configuration[i].value) != Drv::SpiStatus::SPI_OK) {
@@ -88,16 +153,13 @@ bool Rfm69Manager ::configureRadio() {
 }
 
 bool Rfm69Manager ::setMode(U8 mode) {
-    U8 opMode = 0;
-    if (this->readRegister(Reg::OP_MODE, opMode) != Drv::SpiStatus::SPI_OK) {
+    if (!this->requestMode(mode)) {
         return false;
     }
-    opMode = static_cast<U8>((opMode & static_cast<U8>(~Mode::MASK)) | (mode & Mode::MASK));
-    if (this->writeRegister(Reg::OP_MODE, opMode) != Drv::SpiStatus::SPI_OK) {
-        return false;
-    }
-    // Bounded poll for ModeReady (datasheet section 6, RegIrqFlags1)
-    for (U32 i = 0; i < TX_POLL_LIMIT; i++) {
+    // Bounded poll for ModeReady (datasheet section 6, RegIrqFlags1).
+    // Runtime TX uses the scheduler-driven state machine below instead; this
+    // synchronous helper is limited to startup and exceptional RX recovery.
+    for (U32 i = 0; i < MODE_READY_TIMEOUT_TICKS; i++) {
         U8 flags = 0;
         if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
             return false;
@@ -109,14 +171,67 @@ bool Rfm69Manager ::setMode(U8 mode) {
     return false;
 }
 
+bool Rfm69Manager ::requestMode(U8 mode) {
+    U8 opMode = 0;
+    if (this->readRegister(Reg::OP_MODE, opMode) != Drv::SpiStatus::SPI_OK) {
+        return false;
+    }
+    opMode = static_cast<U8>((opMode & static_cast<U8>(~Mode::MASK)) | (mode & Mode::MASK));
+    if (this->writeRegister(Reg::OP_MODE, opMode) != Drv::SpiStatus::SPI_OK) {
+        return false;
+    }
+    return true;
+}
+
+bool Rfm69Manager ::recoverReceive() {
+    // Flush FIFO (FifoOverrun clear), then stand by and re-enter RX so
+    // SyncAddressMatch cannot stick with a single leftover FIFO byte.
+    const bool fifoCleared =
+        this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN) == Drv::SpiStatus::SPI_OK;
+    const bool standby = this->setMode(Mode::STANDBY);
+    const bool rx = this->setMode(Mode::RX);
+    const bool restarted = this->writeRegister(Reg::PACKET_CONFIG_2,
+                                                static_cast<U8>(PacketConfig2::AUTO_RX_RESTART_ON |
+                                                                PacketConfig2::RX_RESTART)) == Drv::SpiStatus::SPI_OK;
+    this->m_rxStaleSyncTicks = 0;
+    return fifoCleared && standby && rx && restarted;
+}
+
+bool Rfm69Manager ::setPowerBoost(bool enabled) {
+    Fw::ParamValid isValid = Fw::ParamValid::INVALID;
+    const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
+    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
+              static_cast<FwAssertArgType>(isValid));
+    TxPowerSetting power{};
+    if (!getTxPowerSetting(txPowerParam, power)) {
+        return false;
+    }
+    if (!power.boost20dBm) {
+        return !enabled;
+    }
+
+    const U8 ocp = enabled ? Pa::OCP_DISABLED : Pa::OCP_NORMAL;
+    const U8 testPa1 = enabled ? Pa::TEST_PA_1_BOOST : Pa::TEST_PA_1_NORMAL;
+    const U8 testPa2 = enabled ? Pa::TEST_PA_2_BOOST : Pa::TEST_PA_2_NORMAL;
+    return (this->writeRegister(Reg::OCP, ocp) == Drv::SpiStatus::SPI_OK) &&
+           (this->writeRegister(Reg::TEST_PA_1, testPa1) == Drv::SpiStatus::SPI_OK) &&
+           (this->writeRegister(Reg::TEST_PA_2, testPa2) == Drv::SpiStatus::SPI_OK);
+}
+
 bool Rfm69Manager ::channelBusy() {
-    // Listen-before-talk: SyncAddressMatch indicates the radio is actively
-    // clocking in a packet (datasheet section 6, RegIrqFlags1)
+    // Software drain in progress, or SyncAddressMatch: uplink clocking in.
+    if (this->m_rxDraining) {
+        return true;
+    }
     U8 flags = 0;
     if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
         return false;
     }
     return (flags & IrqFlags1::SYNC_ADDRESS_MATCH) != 0;
+}
+
+bool Rfm69Manager ::downlinkBlocked() {
+    return this->channelBusy() || (this->m_rxTxHoldoffTicks > 0) || (this->m_txTxHoldoffTicks > 0);
 }
 
 // ----------------------------------------------------------------------
@@ -133,86 +248,221 @@ bool Rfm69Manager ::writeFifo(const U8* data, FwSizeType size) {
     return this->spiWriteRead_out(0, writeBuffer, readBuffer) == Drv::SpiStatus::SPI_OK;
 }
 
-bool Rfm69Manager ::transmitPacket(const U8* data, FwSizeType size) {
+bool Rfm69Manager ::readFifo(U8* data, FwSizeType size) {
     FW_ASSERT(data != nullptr);
-    FW_ASSERT(size <= MAX_PACKET_PAYLOAD, static_cast<FwAssertArgType>(size));
-    // Load the initial FIFO fill while in standby: length byte then payload.
-    // Packets larger than the FIFO are streamed: the remainder is topped up
-    // during transmission whenever FifoLevel drops below the threshold
-    // (datasheet section 5.2.2.3)
-    if (!this->setMode(Mode::STANDBY)) {
-        return false;
-    }
-    if (this->writeRegister(Reg::FIFO, static_cast<U8>(size)) != Drv::SpiStatus::SPI_OK) {
-        return false;
-    }
-    FwSizeType offset = FW_MIN(size, FIFO_SIZE - 1);
-    if (!this->writeFifo(data, offset)) {
-        return false;
-    }
-    // Transmit, topping up the FIFO and awaiting PacketSent with a bounded poll
-    if (!this->setMode(Mode::TX)) {
-        return false;
-    }
-    bool sent = false;
-    bool spiOk = true;
-    for (U32 i = 0; (i < TX_POLL_LIMIT) && !sent && spiOk; i++) {
-        U8 flags = 0;
-        if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
-            spiOk = false;
-            break;
+    FW_ASSERT((size + 1) <= sizeof this->m_mosi, static_cast<FwAssertArgType>(size));
+
+    // The Raspberry Pi SPI0/RFM69 wiring used by the reference deployment
+    // reproducibly samples bit 7 high on the fourth FIFO data byte of a long
+    // read. The RFM69 CRC still passes because it validates the RF packet before
+    // this SPI transfer. Keep every transaction below that boundary. The caller
+    // limits a scheduler tick to RX_FIFO_DRAIN_CHUNK, so this remains a bounded
+    // number of small ioctls rather than an airtime polling loop.
+    FwSizeType offset = 0;
+    while (offset < size) {
+        const FwSizeType chunk = FW_MIN(size - offset, RX_FIFO_SPI_CHUNK);
+        this->m_mosi[0] = Reg::FIFO;
+        (void)::memset(&this->m_mosi[1], 0, chunk);
+        Fw::Buffer writeBuffer(this->m_mosi, chunk + 1);
+        Fw::Buffer readBuffer(this->m_miso, chunk + 1);
+        if (this->spiWriteRead_out(0, writeBuffer, readBuffer) != Drv::SpiStatus::SPI_OK) {
+            return false;
         }
-        if ((offset < size) && ((flags & IrqFlags2::FIFO_LEVEL) == 0)) {
-            const FwSizeType chunk = FW_MIN(size - offset, TX_TOP_UP_CHUNK);
-            spiOk = this->writeFifo(&data[offset], chunk);
-            offset += chunk;
-        } else if (offset >= size) {
-            sent = (flags & IrqFlags2::PACKET_SENT) != 0;
-        }
+        (void)::memcpy(data + offset, &this->m_miso[1], chunk);
+        offset += chunk;
     }
-    // Always return to receive so uplink data is not lost
-    const bool rxOk = this->setMode(Mode::RX);
-    if (sent && rxOk) {
-        this->m_packetsTransmitted++;
-        this->tlmWrite_PacketsTransmitted(this->m_packetsTransmitted);
-    }
-    return sent && rxOk;
+    return true;
 }
 
-FwSizeType Rfm69Manager ::readReceivedPacket(U8* data, FwSizeType capacity) {
+void Rfm69Manager ::abortTransmit() {
+    this->log_WARNING_HI_SendFailed(-1);
+    this->m_txWaitTicks = 0;
+    this->m_txState = TX_ABORT_CLEAR_FIFO;
+}
+
+Rfm69Manager::TxProgress Rfm69Manager ::advanceTransmit() {
+    FW_ASSERT(this->m_txActive);
+    const FwSizeType size = this->m_txBuffer.getSize();
+    const U8* const data = this->m_txBuffer.getData();
     FW_ASSERT(data != nullptr);
-    // Remain in RX and drain the FIFO as the packet streams in: packets
-    // larger than the FIFO are read out while reception continues
-    // (datasheet section 5.2.2.3)
-    U8 length = 0;
-    if (this->readRegister(Reg::FIFO, length) != Drv::SpiStatus::SPI_OK) {
-        return 0;
-    }
-    if ((length == 0) || (static_cast<FwSizeType>(length) > capacity)) {
-        // Invalid length: clear the FIFO to resynchronize
-        (void)this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);
-        return 0;
-    }
-    FwSizeType received = 0;
-    for (U32 i = 0; (i < RX_POLL_LIMIT) && (received < static_cast<FwSizeType>(length)); i++) {
-        U8 flags = 0;
-        if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
-            return 0;
-        }
-        if ((flags & IrqFlags2::FIFO_NOT_EMPTY) != 0) {
-            U8 value = 0;
-            if (this->readRegister(Reg::FIFO, value) != Drv::SpiStatus::SPI_OK) {
-                return 0;
+    FW_ASSERT((size > 0) && (size <= MAX_PACKET_PAYLOAD), static_cast<FwAssertArgType>(size));
+
+    U8 flags = 0;
+    switch (this->m_txState) {
+        case TX_REQUEST_STANDBY:
+            if (!this->requestMode(Mode::STANDBY)) {
+                this->abortTransmit();
+            } else {
+                this->m_txWaitTicks = 0;
+                this->m_txState = TX_WAIT_STANDBY;
             }
-            data[received++] = value;
+            break;
+
+        case TX_WAIT_STANDBY:
+            if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
+                this->abortTransmit();
+            } else if ((flags & IrqFlags1::MODE_READY) != 0) {
+                this->m_txState = TX_CLEAR_FIFO;
+            } else if (++this->m_txWaitTicks >= MODE_READY_TIMEOUT_TICKS) {
+                this->abortTransmit();
+            }
+            break;
+
+        case TX_CLEAR_FIFO:
+            if (this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN) != Drv::SpiStatus::SPI_OK) {
+                this->abortTransmit();
+            } else {
+                this->m_txState = TX_WRITE_LENGTH;
+            }
+            break;
+
+        case TX_WRITE_LENGTH:
+            if (this->writeRegister(Reg::FIFO, static_cast<U8>(size)) != Drv::SpiStatus::SPI_OK) {
+                this->abortTransmit();
+            } else {
+                this->m_txState = TX_LOAD_INITIAL;
+            }
+            break;
+
+        case TX_LOAD_INITIAL: {
+            // FIFO is 66 bytes. Variable-length mode consumes one length byte,
+            // leaving 65 payload bytes for the initial standby preload.
+            const FwSizeType initial = FW_MIN(size, FIFO_SIZE - 1);
+            if (!this->writeFifo(data, initial)) {
+                this->abortTransmit();
+            } else {
+                this->m_txOffset = initial;
+                this->m_txState = TX_ENABLE_BOOST;
+            }
+            break;
         }
+
+        case TX_ENABLE_BOOST: {
+            Fw::ParamValid isValid = Fw::ParamValid::INVALID;
+            const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
+            TxPowerSetting power{};
+            if (((isValid != Fw::ParamValid::VALID) && (isValid != Fw::ParamValid::DEFAULT)) ||
+                !getTxPowerSetting(txPowerParam, power)) {
+                this->abortTransmit();
+            } else if (power.boost20dBm && !this->setPowerBoost(true)) {
+                this->abortTransmit();
+            } else {
+                this->m_txBoostEnabled = power.boost20dBm;
+                this->m_txState = TX_REQUEST_MODE;
+            }
+            break;
+        }
+
+        case TX_REQUEST_MODE:
+            if (!this->requestMode(Mode::TX)) {
+                this->abortTransmit();
+            } else {
+                this->m_txWaitTicks = 0;
+                this->m_txElapsedTicks = 0;
+                this->m_txState = TX_WAIT_MODE;
+            }
+            break;
+
+        case TX_WAIT_MODE:
+            if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
+                this->abortTransmit();
+            } else if ((flags & IrqFlags1::MODE_READY) != 0) {
+                this->m_txState = TX_STREAM;
+            } else if (++this->m_txWaitTicks >= MODE_READY_TIMEOUT_TICKS) {
+                this->abortTransmit();
+            }
+            break;
+
+        case TX_STREAM:
+            if (++this->m_txElapsedTicks >= this->m_txTimeoutTicks) {
+                this->abortTransmit();
+                break;
+            }
+            if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
+                this->abortTransmit();
+                break;
+            }
+            // Below FifoThreshold there is room for TX_TOP_UP_CHUNK without
+            // risking FifoOverrun. At most one bounded burst is written per tick.
+            if ((this->m_txOffset < size) && ((flags & IrqFlags2::FIFO_FULL) == 0) &&
+                ((flags & IrqFlags2::FIFO_LEVEL) == 0)) {
+                const FwSizeType chunk = FW_MIN(size - this->m_txOffset, TX_TOP_UP_CHUNK);
+                if (!this->writeFifo(&data[this->m_txOffset], chunk)) {
+                    this->abortTransmit();
+                } else {
+                    this->m_txOffset += chunk;
+                }
+            } else if ((this->m_txOffset >= size) && ((flags & IrqFlags2::PACKET_SENT) != 0)) {
+                this->m_txState = TX_REQUEST_RX;
+            }
+            break;
+
+        case TX_REQUEST_RX:
+            if (!this->requestMode(Mode::RX)) {
+                this->abortTransmit();
+            } else {
+                this->m_txWaitTicks = 0;
+                this->m_txState = TX_WAIT_RX;
+            }
+            break;
+
+        case TX_WAIT_RX:
+            if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
+                this->abortTransmit();
+            } else if ((flags & IrqFlags1::MODE_READY) != 0) {
+                this->m_txState = TX_DISABLE_BOOST;
+            } else if (++this->m_txWaitTicks >= MODE_READY_TIMEOUT_TICKS) {
+                this->abortTransmit();
+            }
+            break;
+
+        case TX_DISABLE_BOOST:
+            if (this->m_txBoostEnabled && !this->setPowerBoost(false)) {
+                this->abortTransmit();
+                break;
+            }
+            this->m_txBoostEnabled = false;
+            this->m_packetsTransmitted++;
+            this->tlmWrite_PacketsTransmitted(this->m_packetsTransmitted);
+            this->log_WARNING_HI_ConfigurationFailed_ThrottleClear();
+            this->log_WARNING_HI_SendFailed_ThrottleClear();
+            return TX_SUCCEEDED;
+
+        case TX_ABORT_CLEAR_FIFO:
+            (void)this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);
+            this->m_txState = TX_ABORT_REQUEST_RX;
+            break;
+
+        case TX_ABORT_REQUEST_RX:
+            this->m_txWaitTicks = 0;
+            if (this->requestMode(Mode::RX)) {
+                this->m_txState = TX_ABORT_WAIT_RX;
+            } else {
+                this->m_txState = TX_ABORT_DISABLE_BOOST;
+            }
+            break;
+
+        case TX_ABORT_WAIT_RX:
+            if ((this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) ||
+                ((flags & IrqFlags1::MODE_READY) != 0) ||
+                (++this->m_txWaitTicks >= MODE_READY_TIMEOUT_TICKS)) {
+                this->m_txState = TX_ABORT_DISABLE_BOOST;
+            }
+            break;
+
+        case TX_ABORT_DISABLE_BOOST:
+            if (this->m_txBoostEnabled) {
+                (void)this->setPowerBoost(false);
+            }
+            this->m_txBoostEnabled = false;
+            return TX_FAILED;
+
+        case TX_IDLE:
+        default:
+            FW_ASSERT(false, static_cast<FwAssertArgType>(this->m_txState));
+            break;
     }
-    if (received < static_cast<FwSizeType>(length)) {
-        // Reception stalled: clear the FIFO to resynchronize
-        (void)this->writeRegister(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);
-        return 0;
-    }
-    return received;
+    return TX_IN_PROGRESS;
 }
 
 void Rfm69Manager ::updateRssi() {

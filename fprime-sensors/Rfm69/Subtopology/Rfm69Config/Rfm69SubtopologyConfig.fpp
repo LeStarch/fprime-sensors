@@ -3,13 +3,26 @@ module Rfm69 {
         constant BASE_ID = 0xC0000000
     }
 
+    @ Linux platform implementations are intentionally isolated in the
+    @ configuration layer. The topology and manager only use F' ports.
     instance spiDriver: Drv.LinuxSpiDriver base id Rfm69.SubtopologyConfig.BASE_ID + 0x00002000 {
         phase Fpp.ToCpp.Phases.configComponents """
-        if (not Rfm69::spiDriver.open(state.rfm69.device.device, state.rfm69.device.select, Drv::SPI_FREQUENCY_1MHZ)) {
+        // The Pi/reference wiring shows intermittent MISO bit-7 sampling errors
+        // at 5 MHz after the RFM69 has already accepted the RF CRC. One MHz is
+        // comfortably inside the 1 kHz manager budget and is byte-exact in HIL.
+        if (not Rfm69::spiDriver.open(0, 1, Drv::SPI_FREQUENCY_1MHZ,
+                                      Drv::SPI_MODE_CPOL_LOW_CPHA_LOW)) {
             Fw::Logger::log("[ERROR] RFM69 SPI open failed\\n");
         }
-        else {
-            Fw::Logger::log("[INFO] RFM69 SPI open successful\\n");
+        """
+    }
+
+    @ RFM69 active-high reset: BCM GPIO26, physical pin 37.
+    instance resetGpio: Drv.LinuxGpioDriver base id Rfm69.SubtopologyConfig.BASE_ID + 0x00005000 {
+        phase Fpp.ToCpp.Phases.configComponents """
+        if (Rfm69::resetGpio.open("/dev/gpiochip0", 26,
+                                  Drv::LinuxGpioDriver::GPIO_OUTPUT, Fw::Logic::LOW) != Os::File::OP_OK) {
+            Fw::Logger::log("[ERROR] RFM69 reset GPIO26 open failed\\n");
         }
         """
     }

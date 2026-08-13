@@ -8,24 +8,41 @@
 
 #include "Os/Mutex.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ManagerComponentAc.hpp"
-#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Registers.hpp"
+#include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Radio.hpp"
 
 namespace Rfm69 {
 
 class Rfm69Manager final : public Rfm69ManagerComponentBase {
   public:
-    //! Default carrier frequency (Hz): 915 MHz ISM band
-    static constexpr U32 DEFAULT_FREQUENCY_HZ = 915000000;
-    //! Default network ID (second sync word byte)
-    static constexpr U8 DEFAULT_NETWORK_ID = 100;
-    //! Default output power level (0-31, RegPaLevel OutputPower field)
-    static constexpr U8 DEFAULT_POWER_LEVEL = 15;
-    //! Bound on SPI polls awaiting PacketSent for a single packet
-    static constexpr U32 TX_POLL_LIMIT = 10000;
-    //! Bound on SPI polls draining one received packet from the FIFO
-    static constexpr U32 RX_POLL_LIMIT = 10000;
-    //! Bound on packets read out of the radio per run invocation
-    static constexpr U32 RX_PACKETS_PER_TICK = 8;
+    //! Maximum number of bounded scheduler advances allowed while waiting for
+    //! a radio mode transition. Each advance performs at most one status read.
+    static constexpr U32 MODE_READY_TIMEOUT_TICKS = 20;
+    //! Bound on packets completed per run invocation
+    static constexpr U32 RX_PACKETS_PER_TICK = 1;
+    //! Ticks of SyncAddressMatch without FifoLevel/PayloadReady before re-arm.
+    //! Must exceed airtime to fill FIFO_THRESHOLD at the slowest supported rate
+    //! (BR_1200: ~100 ms for 15 bytes); 250 ms leaves margin.
+    static constexpr U32 RX_STALE_SYNC_TICKS = 250;
+    //! After a completed uplink packet, defer downlink this many 1 kHz ticks.
+    //! This is an RX-priority lease for the half-duplex link: each packet in a
+    //! file burst refreshes it, so flight cannot begin a queued downlink in the
+    //! gap before the next ground chunk (~450 ms in the HIL profile). Once the
+    //! burst ends, TX resumes automatically and drains queued TM/events.
+    //! Ground-station local pending-TX hold ignores this timer (channelBusy only).
+    static constexpr U32 RX_TX_HOLDOFF_TICKS = 500;
+    //! Quiet time between consecutive local transmits (1 kHz ticks). At
+    //! 19.2 kbps a ~150 B packet is ~60 ms on air; the peer then needs to
+    //! drain FIFO, run FileUplink, and re-arm RX. Keep this under the GDS
+    //! file-uplink cooldown (1.0 s) so paced chunks are unchanged and a UART
+    //! burst cannot drain pending TX back-to-back.
+    static constexpr U32 TX_TX_HOLDOFF_TICKS = 500;
+
+    // Fixed native-packet modem profile. DATA_RATE, BANDWIDTH_RX, and TX_POWER
+    // are the only operator parameters; these values are deliberately compiled
+    // into both the flight and ground-station implementations.
+    static constexpr U8 FIXED_DATA_MODUL = 0x00;        //!< Packet FSK, no shaping
+    static constexpr U16 FIXED_FDEV_REGISTER = 0x019A; //!< 25 kHz deviation
+    static constexpr U32 FIXED_FREQUENCY_HZ = 915000000U;
 
     // ----------------------------------------------------------------------
     // Component construction and destruction
@@ -38,21 +55,41 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Destroy Rfm69Manager object
     ~Rfm69Manager();
 
-    //! \brief Set the radio configuration; must be called before the radio is initialized
-    //!
-    //! Called during topology setup. Detection and register configuration
-    //! occur on subsequent run invocations.
-    void configure(U32 frequencyHz,  //!< Carrier frequency in Hz
-                   U8 networkId,     //!< Network ID (second sync word byte)
-                   U8 powerLevel     //!< Output power level (0-31)
-    );
-
   private:
-    //! Radio management states
+    //! Software lifecycle: DETECT → CONFIGURE → READY
+    //! (advanced at parametersLoaded; run retries after RESET / param updates)
     enum RadioState {
-        DETECT,     //!< Radio not yet detected on the SPI bus
-        CONFIGURE,  //!< Radio detected; configuration pending
-        READY       //!< Radio configured and in receive mode
+        DETECT,     //!< Looking for RegVersion on SPI
+        CONFIGURE,  //!< Writing profile + entering RX
+        READY       //!< Polling RX / accepting TX
+    };
+
+    //! Non-blocking downlink sequence. No state performs an airtime wait: the
+    //! 1 kHz scheduler advances the sequence with bounded SPI transactions.
+    enum TxState {
+        TX_IDLE,
+        TX_REQUEST_STANDBY,
+        TX_WAIT_STANDBY,
+        TX_CLEAR_FIFO,
+        TX_WRITE_LENGTH,
+        TX_LOAD_INITIAL,
+        TX_ENABLE_BOOST,
+        TX_REQUEST_MODE,
+        TX_WAIT_MODE,
+        TX_STREAM,
+        TX_REQUEST_RX,
+        TX_WAIT_RX,
+        TX_DISABLE_BOOST,
+        TX_ABORT_CLEAR_FIFO,
+        TX_ABORT_REQUEST_RX,
+        TX_ABORT_WAIT_RX,
+        TX_ABORT_DISABLE_BOOST
+    };
+
+    enum TxProgress {
+        TX_IN_PROGRESS,
+        TX_SUCCEEDED,
+        TX_FAILED
     };
 
     // ----------------------------------------------------------------------
@@ -65,24 +102,80 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Handler implementation for dataReturnIn: buffer ownership returned
     void dataReturnIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::FrameContext& context) override;
 
-    //! Handler implementation for run: radio initialization and receive polling
+    //! Handler implementation for run: receive polling (or init retry if not READY)
     void run_handler(FwIndexType portNum, U32 context) override;
+
+    // ----------------------------------------------------------------------
+    // Command handler implementations
+    // ----------------------------------------------------------------------
+
+    //! Handler for the TRANSMIT command: enable/disable downlink
+    void TRANSMIT_cmdHandler(FwOpcodeType opCode,     //!< The command opcode
+                             U32 cmdSeq,              //!< The command sequence number
+                             const Rfm69::TransmitState& enabled  //!< Desired transmit state
+                             ) override;
+
+    //! Handler for RESET: pulse hardware RST and reinitialize the radio
+    void RESET_cmdHandler(FwOpcodeType opCode,  //!< The command opcode
+                          U32 cmdSeq            //!< The command sequence number
+                          ) override;
+
+    //! Schedule CONFIGURE on the next run tick after a parameter set
+    void parameterUpdated(FwPrmIdType id  //!< The parameter ID
+                          ) override;
+
+    //! Mark parameters loaded and bring the radio to READY before rate groups start
+    void parametersLoaded() override;
 
     // ----------------------------------------------------------------------
     // Helper functions: radio state management (Rfm69Manager.cpp)
     // ----------------------------------------------------------------------
 
-    //! Advance detection/configuration; returns true when READY
+    //! Advance detection/configuration toward READY
     void initializeRadio();
 
-    //! Poll for and deliver received packets
+    //! Poll for and deliver received packets (budgeted per 1 kHz tick)
     void pollReceive();
 
-    //! Transmit a deferred frame once the channel clears
-    void retryDeferredTransmit();
+    //! Continue an in-progress FIFO drain; returns true when a full packet is ready
+    bool continueReceiveDrain();
 
-    //! Segment and transmit a frame; returns true when all packets sent
-    bool transmitFrame(Fw::Buffer& data);
+    //! Start a new drain after validating IRQ flags; returns true if draining
+    bool beginReceiveDrain(U8 flags2);
+
+    //! Deliver m_rxPayload[0..m_rxReceived) to the uplink Com path
+    void deliverReceivedPacket();
+
+    //! Abort an in-progress drain and re-arm the receiver
+    void abortReceiveDrain();
+
+    //! Request a reset pulse from the platform GPIO driver, if connected.
+    //! \return true if unconnected or the HIGH/LOW pulse succeeded; false on
+    //!         GPIO error. Callers must not treat false as fatal — reset is optional.
+    bool pulseReset();
+
+    //! Stage one native RF packet for scheduler-driven transmission.
+    bool startTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context);
+
+    //! True when this deployment has no ComQueue retry path (comStatusOut unwired).
+    //! Ground-station topologies use a local pending-TX hold instead of dropping.
+    bool usesLocalTxHold() const;
+
+    //! Enqueue one uplink buffer for a later run() tick. Returns false if full.
+    bool enqueuePendingTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context);
+
+    //! If idle and clear, start the oldest pending uplink packet.
+    //! Returns true when dropBuffer/dropContext must be returned after unlock.
+    bool tryStartPendingTransmit(Fw::Buffer& dropBuffer, ComCfg::FrameContext& dropContext);
+
+    //! Advance the scheduler-driven transmit sequence by one bounded step.
+    TxProgress advanceTransmit();
+
+    //! Enter bounded abort recovery after a transmit SPI/timeout failure.
+    void abortTransmit();
+
+    //! Non-blocking bus lock for run: returns false if TX (or other owner) holds it
+    bool tryAcquireBus();
 
     // ----------------------------------------------------------------------
     // Helper functions: RFM69 register access (Rfm69Helpers.cpp)
@@ -108,23 +201,37 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     bool setMode(U8 mode  //!< Mode field value (Rfm69::Mode)
     );
 
-    //! \brief Listen-before-talk: true when a reception is in progress
+    //! Request an operating mode without waiting for ModeReady.
+    bool requestMode(U8 mode  //!< Mode field value (Rfm69::Mode)
+    );
+
+    //! Clear FIFO/re-arm packet RX after a timeout or malformed packet
+    bool recoverReceive();
+
+    //! Enable or restore the short-duration +20 dBm PA boost path.
+    bool setPowerBoost(bool enabled);
+
+    //! \brief True when a reception is in progress (defer TX via Com FAILURE)
     bool channelBusy();
+
+    //! \brief True when downlink should wait (RX in progress or post-RX holdoff)
+    bool downlinkBlocked();
+
+    //! Emit comStatusOut when connected
+    void emitComStatus(Fw::Success status);
+
+    //! If a prior FAILURE left ComQueue waiting, clear resume flag once ready.
+    //! Returns true when the caller should emit SUCCESS after releasing m_lock.
+    bool maybeResumeComStatus();
 
     //! \brief Burst-write a block of payload bytes into the FIFO
     bool writeFifo(const U8* data,  //!< Bytes to load
                    FwSizeType size  //!< Byte count
     );
 
-    //! \brief Transmit one packet of at most MAX_PACKET_PAYLOAD bytes
-    bool transmitPacket(const U8* data,  //!< Payload data
-                        FwSizeType size  //!< Payload size
-    );
-
-    //! \brief Read one received packet out of the radio FIFO
-    //! \return payload size read, or 0 on failure
-    FwSizeType readReceivedPacket(U8* data,            //!< [out] Payload data
-                                  FwSizeType capacity  //!< Capacity of data
+    //! Burst-read bytes from the FIFO.
+    bool readFifo(U8* data,  //!< Destination bytes
+                  FwSizeType size //!< Byte count
     );
 
     //! \brief Read the RSSI register and update telemetry
@@ -139,20 +246,61 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! share the SPI scratch buffers
     Os::Mutex m_lock;
 
+    //! True while a downlink buffer is owned by the scheduler-driven TX state machine.
+    bool m_txActive;
+    TxState m_txState;
+    Fw::Buffer m_txBuffer;
+    ComCfg::FrameContext m_txContext;
+    FwSizeType m_txOffset;
+    U32 m_txWaitTicks;
+    U32 m_txElapsedTicks;
+    U32 m_txTimeoutTicks;
+    bool m_txBoostEnabled;
+
+    //! Local hold used when comStatusOut is unwired (no ComQueue). Mirrors the
+    //! Arduino RadioHead ground-station usbHold/retry behavior for half-duplex.
+    //! Sized to the GS frame-bin pool (8×272) so a short GDS burst cannot
+    //! overflow and drop mid-file CFDP DATA packets (flight ignores this hold).
+    static constexpr U32 PENDING_TX_DEPTH = 8;
+    Fw::Buffer m_pendingTxBuffers[PENDING_TX_DEPTH];
+    ComCfg::FrameContext m_pendingTxContexts[PENDING_TX_DEPTH];
+    U32 m_pendingTxCount;
+
+    //! True while streaming a variable-length RX packet across run ticks
+    bool m_rxDraining;
+    U8 m_rxLength;              //!< Declared payload length from the length byte
+    FwSizeType m_rxReceived;    //!< Bytes of payload copied so far
+    //! True once PayloadReady was observed while draining the current packet.
+    //! With CrcOn + CrcAutoClear (RegPacketConfig1=0xD0) the RFM69 only asserts
+    //! PayloadReady on a CRC pass and flushes the FIFO on a CRC failure, so a
+    //! packet whose byte count completes without PayloadReady is corrupt and must
+    //! be dropped rather than handed to the deframer.
+    bool m_rxSawPayloadReady;
+    U8 m_rxPayload[MAX_PACKET_PAYLOAD];
+    //! Divider state and bitrate-derived idle/streaming SPI poll periods.
+    //! Idle polling only needs to notice a packet before the 66-byte FIFO fills;
+    //! streaming polling must drain faster than bytes arrive.
+    U32 m_rxPollTicks;
+    U32 m_rxIdlePollDivisor;
+    U32 m_rxActivePollDivisor;
+    //! Consecutive ticks seeing sync+fifo without FifoLevel/PayloadReady
+    U32 m_rxStaleSyncTicks;
+    //! Remaining 1 kHz ticks to defer flight downlink after a completed RX
+    U32 m_rxTxHoldoffTicks;
+    //! Remaining 1 kHz ticks to defer the next local TX after a completed TX
+    U32 m_txTxHoldoffTicks;
+
     RadioState m_state;        //!< Radio management state
-    bool m_configured;         //!< configure() has been called
-    U32 m_frequencyHz;         //!< Carrier frequency (Hz)
-    U8 m_networkId;            //!< Network ID (sync word byte 2)
-    U8 m_powerLevel;           //!< Output power level (0-31)
+    bool m_configured;         //!< FPP parameters have been loaded
     U32 m_packetsTransmitted;  //!< Count of transmitted packets
     U32 m_packetsReceived;     //!< Count of received packets
-    U32 m_transmitFailures;    //!< Count of failed transmissions
-    U32 m_transmitsDeferred;   //!< Count of transmissions deferred by listen-before-talk
-
-    //! Frame deferred by listen-before-talk awaiting a clear channel
-    Fw::Buffer m_deferredBuffer;
-    ComCfg::FrameContext m_deferredContext;
-    bool m_deferredValid;
+    U32 m_rxCrcErrors;         //!< Count of RX frames dropped for failing CRC
+    TransmitState m_transmitEnabled;  //!< Whether downlink transmit is permitted
+    bool m_resetPulsed;                //!< True once optional RST was attempted (success or fail)
+    bool m_comStatusAnnounced;          //!< Initial link-ready status has been sent
+    //! Set after reporting FAILURE so run can emit SUCCESS when downlink is
+    //! allowed again (holdoff expired, radio ready).
+    bool m_comResumeNeeded;
 
     //! Scratch buffers for SPI transactions (address byte + length + payload)
     U8 m_mosi[MAX_PACKET_PAYLOAD + 2];
