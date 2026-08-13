@@ -31,7 +31,9 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     // ----------------------------------------------------------------------
 
     //! Construct object Rfm69ManagerTester
-    Rfm69ManagerTester();
+    //! \param localHold when true, comStatusOut is left unconnected so the
+    //!        component selects the ground-station local pending-TX hold mode
+    explicit Rfm69ManagerTester(bool localHold = false);
 
     //! Destroy object Rfm69ManagerTester
     ~Rfm69ManagerTester();
@@ -91,6 +93,9 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! Half-duplex: TX while RX is in progress is dropped immediately
     void test_transmit_dropped_when_busy();
 
+    //! Downlink deferred by continual uplink resumes via the starvation cap
+    void test_downlink_starvation_recovery();
+
     //! Transmission before the radio is ready (REQ-012)
     void test_transmit_not_ready();
 
@@ -114,6 +119,18 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
 
     //! TRANSMIT command gives a commandable receive-only window
     void test_transmit_disabled();
+
+    //! Re-enabling TRANSMIT without a prior deferral emits no unsolicited SUCCESS
+    void test_transmit_enable_idempotent();
+
+    //! RESET during an active TX returns the buffer and recovers to READY
+    void test_reset_during_transmit();
+
+    //! A latched SyncAddressMatch with no FIFO progress triggers RX restart
+    void test_stale_sync_recovery();
+
+    //! Local hold mode (comStatusOut unconnected): frames queue in FIFO order
+    void test_local_hold_ordering();
 
     //! An absent (unpowered) radio is not detected; recovery follows power-up
     void test_detection_radio_absent();
@@ -164,6 +181,9 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! Connect ports and initialize components (autocoded helpers)
     void connectPorts();
     void initComponents();
+
+    //! connectPorts() minus comStatusOut: selects local pending-TX hold mode
+    void connectPortsLocalHold();
 
     // ----------------------------------------------------------------------
     // Variables

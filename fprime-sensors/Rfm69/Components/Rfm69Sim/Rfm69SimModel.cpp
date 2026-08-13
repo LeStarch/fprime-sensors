@@ -61,7 +61,7 @@ void Rfm69SimModel::reset() {
     this->m_registers[Reg::PACKET_CONFIG_1] = 0x10;
     this->m_registers[Reg::PAYLOAD_LENGTH] = 0x40;
     this->m_registers[Reg::FIFO_THRESH] = 0x0F;
-    this->m_registers[Reg::PACKET_CONFIG_2] = 0x02;
+    this->m_registers[Reg::PACKET_CONFIG_2] = PacketConfig2::AUTO_RX_RESTART_ON;
     this->m_fifoCount = 0;
     this->m_registerWriteCount = 0;
     this->m_modeSettleRemaining = this->m_modeSettleByteTimes;
@@ -329,11 +329,12 @@ void Rfm69SimModel::writeRegister(U8 address, U8 value) {
             }
             break;
         case Reg::PACKET_CONFIG_2:
-            // RxRestart (bit 2) is a command bit: it self-clears, flushes
-            // stale receive state, and makes a queued air packet eligible for
-            // a fresh receive cycle. AutoRxRestartOn (bit 1) remains set.
-            this->m_registers[Reg::PACKET_CONFIG_2] = static_cast<U8>(value & static_cast<U8>(~0x04));
-            if ((value & 0x04) != 0) {
+            // RxRestart is a command bit: it self-clears, flushes stale
+            // receive state, and makes a queued air packet eligible for a
+            // fresh receive cycle. AutoRxRestartOn remains set.
+            this->m_registers[Reg::PACKET_CONFIG_2] =
+                static_cast<U8>(value & static_cast<U8>(~PacketConfig2::RX_RESTART));
+            if ((value & PacketConfig2::RX_RESTART) != 0) {
                 this->m_fifoCount = 0;
                 this->m_payloadReady = false;
                 this->m_fifoOverrun = false;

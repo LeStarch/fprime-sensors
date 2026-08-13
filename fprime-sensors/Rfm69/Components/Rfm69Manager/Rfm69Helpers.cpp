@@ -49,16 +49,21 @@ bool Rfm69Manager ::detectRadio() {
 bool Rfm69Manager ::configureRadio() {
     // Read operator params at configure time (same pattern as LoRa enableRx/Tx).
     // All other modem registers come from NATIVE_PACKET_PROFILE.
+    // Parameter validity is ground-managed input: fail into ConfigurationFailed
+    // and retry on the next tick rather than asserting.
     Fw::ParamValid isValid = Fw::ParamValid::INVALID;
     const Rfm69DataRate dataRateParam = this->paramGet_DATA_RATE(isValid);
-    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
-              static_cast<FwAssertArgType>(isValid));
+    if ((isValid != Fw::ParamValid::VALID) && (isValid != Fw::ParamValid::DEFAULT)) {
+        return false;
+    }
     const Rfm69Bandwidth bandwidthParam = this->paramGet_BANDWIDTH_RX(isValid);
-    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
-              static_cast<FwAssertArgType>(isValid));
+    if ((isValid != Fw::ParamValid::VALID) && (isValid != Fw::ParamValid::DEFAULT)) {
+        return false;
+    }
     const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
-    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
-              static_cast<FwAssertArgType>(isValid));
+    if ((isValid != Fw::ParamValid::VALID) && (isValid != Fw::ParamValid::DEFAULT)) {
+        return false;
+    }
 
     DataRateSetting dataRate{};
     BandwidthSetting bandwidth{};
@@ -73,25 +78,21 @@ bool Rfm69Manager ::configureRadio() {
     // fill, while active polls drain one watermark faster than bytes arrive.
     // This avoids a blocking SPI ioctl on every 1 ms tick and prevents the
     // ActiveRateGroup queue from backing up under normal Linux scheduling jitter.
+    this->m_rxActivePollDivisor = 1;
     if (dataRateParam == Rfm69DataRate::BR_38400) {
         this->m_rxIdlePollDivisor = 4;
-        this->m_rxActivePollDivisor = 1;
         this->m_txTimeoutTicks = 150;
     } else if (dataRateParam == Rfm69DataRate::BR_19200) {
         this->m_rxIdlePollDivisor = 8;
-        this->m_rxActivePollDivisor = 1;
         this->m_txTimeoutTicks = 250;
     } else if (dataRateParam == Rfm69DataRate::BR_9600) {
         this->m_rxIdlePollDivisor = 16;
-        this->m_rxActivePollDivisor = 1;
         this->m_txTimeoutTicks = 400;
     } else if (dataRateParam == Rfm69DataRate::BR_4800) {
         this->m_rxIdlePollDivisor = 32;
-        this->m_rxActivePollDivisor = 1;
         this->m_txTimeoutTicks = 750;
     } else {
         this->m_rxIdlePollDivisor = 64;
-        this->m_rxActivePollDivisor = 1;
         this->m_txTimeoutTicks = 3000;
     }
     this->m_rxPollTicks = 0;
@@ -192,18 +193,24 @@ bool Rfm69Manager ::recoverReceive() {
 }
 
 bool Rfm69Manager ::setPowerBoost(bool enabled) {
-    Fw::ParamValid isValid = Fw::ParamValid::INVALID;
-    const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
-    FW_ASSERT((isValid == Fw::ParamValid::VALID) || (isValid == Fw::ParamValid::DEFAULT),
-              static_cast<FwAssertArgType>(isValid));
-    TxPowerSetting power{};
-    if (!getTxPowerSetting(txPowerParam, power)) {
-        return false;
+    if (enabled) {
+        // Enable is only supported for the +20 dBm setting.
+        Fw::ParamValid isValid = Fw::ParamValid::INVALID;
+        const Rfm69TxPower txPowerParam = this->paramGet_TX_POWER(isValid);
+        if ((isValid != Fw::ParamValid::VALID) && (isValid != Fw::ParamValid::DEFAULT)) {
+            return false;
+        }
+        TxPowerSetting power{};
+        if (!getTxPowerSetting(txPowerParam, power)) {
+            return false;
+        }
+        if (!power.boost20dBm) {
+            return false;
+        }
     }
-    if (!power.boost20dBm) {
-        return !enabled;
-    }
-
+    // Disable always restores the safe OCP/TestPa values unconditionally: the
+    // TX_POWER parameter may have changed while a boosted transmit was in
+    // flight, and boost registers must never remain active in RX.
     const U8 ocp = enabled ? Pa::OCP_DISABLED : Pa::OCP_NORMAL;
     const U8 testPa1 = enabled ? Pa::TEST_PA_1_BOOST : Pa::TEST_PA_1_NORMAL;
     const U8 testPa2 = enabled ? Pa::TEST_PA_2_BOOST : Pa::TEST_PA_2_NORMAL;
@@ -219,6 +226,9 @@ bool Rfm69Manager ::channelBusy() {
     }
     U8 flags = 0;
     if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
+        // A bus fault reads as "clear" so the transmit path is taken and its
+        // own SPI failure handling reports RADIO_FAULT instead of silently
+        // deferring downlink forever on a dead bus.
         return false;
     }
     return (flags & IrqFlags1::SYNC_ADDRESS_MATCH) != 0;

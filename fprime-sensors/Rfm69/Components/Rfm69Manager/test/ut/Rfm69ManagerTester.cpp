@@ -11,7 +11,7 @@ namespace Rfm69 {
 // Construction and destruction
 // ----------------------------------------------------------------------
 
-Rfm69ManagerTester ::Rfm69ManagerTester()
+Rfm69ManagerTester ::Rfm69ManagerTester(bool localHold)
     : Rfm69ManagerGTestBase("Rfm69ManagerTester", Rfm69ManagerTester::MAX_HISTORY_SIZE),
       component("Rfm69Manager"),
       m_model(),
@@ -19,7 +19,36 @@ Rfm69ManagerTester ::Rfm69ManagerTester()
       m_allocFail(false),
       m_allocation{} {
     this->initComponents();
-    this->connectPorts();
+    if (localHold) {
+        this->connectPortsLocalHold();
+    } else {
+        this->connectPorts();
+    }
+}
+
+void Rfm69ManagerTester ::connectPortsLocalHold() {
+    // Mirrors the autocoded connectPorts() minus comStatusOut: the component
+    // detects the unconnected port and selects local pending-TX hold mode.
+    this->connect_to_CmdDisp(0, this->component.get_CmdDisp_InputPort(0));
+    this->component.set_CmdReg_OutputPort(0, this->get_from_CmdReg(0));
+    this->component.set_CmdStatus_OutputPort(0, this->get_from_CmdStatus(0));
+    this->component.set_logOut_OutputPort(0, this->get_from_logOut(0));
+#if FW_ENABLE_TEXT_LOGGING == 1
+    this->component.set_logTextOut_OutputPort(0, this->get_from_logTextOut(0));
+#endif
+    this->component.set_prmGet_OutputPort(0, this->get_from_prmGet(0));
+    this->component.set_prmSet_OutputPort(0, this->get_from_prmSet(0));
+    this->component.set_timeCaller_OutputPort(0, this->get_from_timeCaller(0));
+    this->component.set_tlmOut_OutputPort(0, this->get_from_tlmOut(0));
+    this->connect_to_dataIn(0, this->component.get_dataIn_InputPort(0));
+    this->connect_to_dataReturnIn(0, this->component.get_dataReturnIn_InputPort(0));
+    this->connect_to_run(0, this->component.get_run_InputPort(0));
+    this->component.set_allocate_OutputPort(0, this->get_from_allocate(0));
+    this->component.set_dataOut_OutputPort(0, this->get_from_dataOut(0));
+    this->component.set_dataReturnOut_OutputPort(0, this->get_from_dataReturnOut(0));
+    this->component.set_deallocate_OutputPort(0, this->get_from_deallocate(0));
+    this->component.set_resetGpio_OutputPort(0, this->get_from_resetGpio(0));
+    this->component.set_spiWriteRead_OutputPort(0, this->get_from_spiWriteRead(0));
 }
 
 Rfm69ManagerTester ::~Rfm69ManagerTester() {}
@@ -608,6 +637,49 @@ void Rfm69ManagerTester ::test_transmit_dropped_when_busy() {
     ASSERT_TLM_PacketsTransmitted_SIZE(0);
 }
 
+void Rfm69ManagerTester ::test_downlink_starvation_recovery() {
+    this->makeReady();
+
+    // Periodic uplink shorter than the RX lease keeps re-arming it forever.
+    U8 uplink[16];
+    for (FwSizeType i = 0; i < sizeof uplink; i++) {
+        uplink[i] = static_cast<U8>(i);
+    }
+    this->m_model.injectAirData(uplink, sizeof uplink);
+    for (U32 tick = 0; (tick < 1024) && (this->fromPortHistory_dataOut->size() == 0); tick++) {
+        this->invoke_to_run(0, 0);
+    }
+    ASSERT_from_dataOut_SIZE(1);
+
+    // A downlink attempt during the lease is deferred with FAILURE.
+    U8 data[32] = {0x5A};
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+    ASSERT_from_comStatusOut_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
+    ASSERT_from_dataReturnOut_SIZE(1);
+
+    // Re-arm the lease more often than it can decay. The starvation cap must
+    // still open a downlink window and resume ComQueue with SUCCESS.
+    this->clearHistory();
+    bool resumed = false;
+    const U32 keepaliveTicks = Rfm69Manager::RX_TX_HOLDOFF_TICKS - 100;
+    const U32 bound = 3 * Rfm69Manager::RX_HOLDOFF_STARVATION_TICKS;
+    for (U32 tick = 0; tick < bound; tick++) {
+        if ((tick % keepaliveTicks) == (keepaliveTicks - 1)) {
+            this->m_model.injectAirData(uplink, sizeof uplink);
+        }
+        this->invoke_to_run(0, 0);
+        if (this->fromPortHistory_comStatusOut->size() > 0) {
+            resumed = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(resumed);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+}
+
 void Rfm69ManagerTester ::test_transmit_not_ready() {
     // No initialization: transmission must be refused with FAILURE status.
     // The refusal is deliberate flow control, not a fault: FAILURE pauses
@@ -795,6 +867,132 @@ void Rfm69ManagerTester ::test_transmit_disabled() {
     this->runUntilTransmitCompletes();
     ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
     ASSERT_TLM_PacketsTransmitted(0, 1);
+}
+
+void Rfm69ManagerTester ::test_transmit_enable_idempotent() {
+    this->makeReady();
+    // No frame was deferred while disabled: re-enabling must not emit an
+    // unsolicited SUCCESS (ComQueue asserts on a resume while READY).
+    this->sendCmd_TRANSMIT(0, 0, Rfm69::TransmitState::DISABLED);
+    this->sendCmd_TRANSMIT(0, 1, Rfm69::TransmitState::ENABLED);
+    ASSERT_CMD_RESPONSE_SIZE(2);
+    ASSERT_from_comStatusOut_SIZE(0);
+
+    // Enabling while already enabled is also silent.
+    this->sendCmd_TRANSMIT(0, 2, Rfm69::TransmitState::ENABLED);
+    ASSERT_from_comStatusOut_SIZE(0);
+}
+
+void Rfm69ManagerTester ::test_reset_during_transmit() {
+    this->makeReady();
+    // Stall PacketSent so the staged TX stays active across ticks.
+    this->m_model.setPacketSentStall(true);
+    U8 data[32];
+    for (FwSizeType i = 0; i < sizeof data; i++) {
+        data[i] = static_cast<U8>(i);
+    }
+    Fw::Buffer buffer(data, sizeof data);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, buffer, context);
+    this->runTicks(8);
+    ASSERT_from_dataReturnOut_SIZE(0);
+
+    // RESET while TX is active: the buffer is returned with FAILURE and no
+    // further TX SPI traffic follows once the reset sequence begins.
+    this->sendCmd_RESET(0, 0);
+    ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_RESET, 0, Fw::CmdResponse::OK);
+    ASSERT_from_dataReturnOut_SIZE(1);
+    ASSERT_from_comStatusOut_SIZE(1);
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::FAILURE));
+    ASSERT_TLM_PacketsTransmitted_SIZE(0);
+
+    // The radio recovers to READY and can transmit again.
+    this->m_model.setPacketSentStall(false);
+    this->clearHistory();
+    this->runUntilReady();
+    ASSERT_EVENTS_RadioReady_SIZE(1);
+    this->clearHistory();
+    this->invoke_to_dataIn(0, buffer, context);
+    this->runUntilTransmitCompletes();
+    ASSERT_from_comStatusOut(0, Fw::Success(Fw::Success::SUCCESS));
+    U8 transmitted[MAX_PACKET_PAYLOAD];
+    ASSERT_EQ(this->m_model.retrievePacket(transmitted, sizeof transmitted), sizeof data);
+}
+
+void Rfm69ManagerTester ::test_stale_sync_recovery() {
+    this->makeReady();
+    // A carrier asserts SyncAddressMatch with no FIFO progress: after the
+    // bounded stale window the manager must command an RX restart.
+    this->m_model.setChannelBusy(true);
+    this->m_model.clearRegisterWriteHistory();
+    this->runTicks(3 * Rfm69Manager::RX_STALE_SYNC_TICKS);
+    ASSERT_TRUE(this->m_model.wasRegisterWritten(
+        Reg::PACKET_CONFIG_2,
+        static_cast<U8>(PacketConfig2::AUTO_RX_RESTART_ON | PacketConfig2::RX_RESTART)));
+
+    // The link still works after recovery.
+    this->m_model.setChannelBusy(false);
+    this->clearHistory();
+    U8 good[24];
+    for (FwSizeType i = 0; i < sizeof good; i++) {
+        good[i] = static_cast<U8>(i + 1);
+    }
+    this->m_model.injectAirData(good, sizeof good);
+    for (U32 tick = 0; tick < 1024; tick++) {
+        this->invoke_to_run(0, 0);
+        if (this->fromPortHistory_dataOut->size() > 0) {
+            break;
+        }
+    }
+    ASSERT_from_dataOut_SIZE(1);
+}
+
+void Rfm69ManagerTester ::test_local_hold_ordering() {
+    // Constructed with comStatusOut unconnected: local pending-TX hold mode.
+    ASSERT_FALSE(this->component.isConnected_comStatusOut_OutputPort(0));
+    this->setDefaultParameters();
+    this->component.loadParameters();
+    this->runUntilReady();
+    ASSERT_EVENTS_RadioReady_SIZE(1);
+    this->clearHistory();
+
+    // While muted, frames are held locally (not dropped, no status).
+    this->sendCmd_TRANSMIT(0, 0, Rfm69::TransmitState::DISABLED);
+    U8 first[16];
+    U8 second[16];
+    for (FwSizeType i = 0; i < sizeof first; i++) {
+        first[i] = static_cast<U8>(0x10 + i);
+        second[i] = static_cast<U8>(0x80 + i);
+    }
+    Fw::Buffer firstBuffer(first, sizeof first);
+    Fw::Buffer secondBuffer(second, sizeof second);
+    ComCfg::FrameContext context;
+    this->invoke_to_dataIn(0, firstBuffer, context);
+    this->invoke_to_dataIn(0, secondBuffer, context);
+    ASSERT_from_dataReturnOut_SIZE(0);
+
+    // Re-enable: held frames drain oldest-first, paced by the TX holdoff.
+    this->sendCmd_TRANSMIT(0, 1, Rfm69::TransmitState::ENABLED);
+    for (U32 tick = 0; tick < (4 * Rfm69Manager::TX_TX_HOLDOFF_TICKS); tick++) {
+        this->invoke_to_run(0, 0);
+        if (this->fromPortHistory_dataReturnOut->size() >= 2) {
+            break;
+        }
+    }
+    ASSERT_from_dataReturnOut_SIZE(2);
+    ASSERT_TLM_PacketsTransmitted(1, 2);
+
+    U8 transmitted[MAX_PACKET_PAYLOAD];
+    FwSizeType size = this->m_model.retrievePacket(transmitted, sizeof transmitted);
+    ASSERT_EQ(size, sizeof first);
+    for (FwSizeType i = 0; i < size; i++) {
+        ASSERT_EQ(transmitted[i], first[i]);
+    }
+    size = this->m_model.retrievePacket(transmitted, sizeof transmitted);
+    ASSERT_EQ(size, sizeof second);
+    for (FwSizeType i = 0; i < size; i++) {
+        ASSERT_EQ(transmitted[i], second[i]);
+    }
 }
 
 }  // namespace Rfm69

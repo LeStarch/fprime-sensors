@@ -17,8 +17,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Maximum number of bounded scheduler advances allowed while waiting for
     //! a radio mode transition. Each advance performs at most one status read.
     static constexpr U32 MODE_READY_TIMEOUT_TICKS = 20;
-    //! Bound on packets completed per run invocation
-    static constexpr U32 RX_PACKETS_PER_TICK = 1;
     //! Ticks of SyncAddressMatch without FifoLevel/PayloadReady before re-arm.
     //! Must exceed airtime to fill FIFO_THRESHOLD at the slowest supported rate
     //! (BR_1200: ~100 ms for 15 bytes); 250 ms leaves margin.
@@ -36,6 +34,13 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! file-uplink cooldown (1.0 s) so paced chunks are unchanged and a UART
     //! burst cannot drain pending TX back-to-back.
     static constexpr U32 TX_TX_HOLDOFF_TICKS = 500;
+    //! Upper bound on consecutive ticks a pending downlink may remain blocked
+    //! by the RX-priority lease. Periodic uplink (e.g. GDS keepalives every
+    //! 0.5 s) re-arms RX_TX_HOLDOFF_TICKS on every received packet, which
+    //! would otherwise starve telemetry indefinitely. When the cap expires,
+    //! the lease is dropped so one downlink window opens; an RX actively
+    //! clocking in (channelBusy) is still honored.
+    static constexpr U32 RX_HOLDOFF_STARVATION_TICKS = 2 * RX_TX_HOLDOFF_TICKS;
 
     // Fixed native-packet modem profile. DATA_RATE, BANDWIDTH_RX, and TX_POWER
     // are the only operator parameters; these values are deliberately compiled
@@ -134,7 +139,7 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     void parameterUpdated(FwPrmIdType id  //!< The parameter ID
                           ) override;
 
-    //! Mark parameters loaded and bring the radio to READY before rate groups start
+    //! Mark parameters available; bring-up itself is advanced by run() ticks
     void parametersLoaded() override;
 
     // ----------------------------------------------------------------------
@@ -153,8 +158,11 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Start a new drain after validating IRQ flags; returns true if draining
     bool beginReceiveDrain();
 
-    //! Deliver m_rxPayload[0..m_rxReceived) to the uplink Com path
-    void deliverReceivedPacket();
+    //! Mark a completed RX packet for delivery on this tick (under m_lock)
+    void stageReceivedPacket();
+
+    //! Allocate and emit a received packet on dataOut (outside m_lock)
+    void deliverReceivedPacket(const U8* data, FwSizeType size);
 
     //! Abort an in-progress drain and re-arm the receiver
     void abortReceiveDrain();
@@ -257,14 +265,14 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
 
     //! True while a downlink buffer is owned by the scheduler-driven TX state machine.
     bool m_txActive;
-    TxState m_txState;
-    Fw::Buffer m_txBuffer;
-    ComCfg::FrameContext m_txContext;
-    FwSizeType m_txOffset;
-    U32 m_txWaitTicks;
-    U32 m_txElapsedTicks;
-    U32 m_txTimeoutTicks;
-    bool m_txBoostEnabled;
+    TxState m_txState;                //!< Current step of the staged TX sequence
+    Fw::Buffer m_txBuffer;            //!< Downlink buffer owned by the TX machine
+    ComCfg::FrameContext m_txContext; //!< Frame context returned with m_txBuffer
+    FwSizeType m_txOffset;            //!< Payload bytes already streamed to the FIFO
+    U32 m_txWaitTicks;                //!< Ticks spent in the current ModeReady wait
+    U32 m_txElapsedTicks;             //!< Total ticks since TX start (overall bound)
+    U32 m_txTimeoutTicks;             //!< Bitrate-derived bound on m_txElapsedTicks
+    bool m_txBoostEnabled;            //!< +20 dBm boost registers currently active
 
     //! Local hold used when comStatusOut is unwired (no ComQueue). Mirrors the
     //! Arduino RadioHead ground-station usbHold/retry behavior for half-duplex.
@@ -286,6 +294,10 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! be dropped rather than handed to the deframer.
     bool m_rxSawPayloadReady;
     U8 m_rxPayload[MAX_PACKET_PAYLOAD];
+    static_assert(sizeof(m_rxPayload) == MAX_PACKET_PAYLOAD,
+                  "RX drain bounds checks assume m_rxPayload holds MAX_PACKET_PAYLOAD bytes");
+    //! Completed packet length staged for post-unlock delivery (0 = none)
+    FwSizeType m_rxDeliverSize;
     //! Divider state and bitrate-derived idle/streaming SPI poll periods.
     //! Idle polling only needs to notice a packet before the 66-byte FIFO fills;
     //! streaming polling must drain faster than bytes arrive.
@@ -298,6 +310,8 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     U32 m_rxTxHoldoffTicks;
     //! Remaining 1 kHz ticks to defer the next local TX after a completed TX
     U32 m_txTxHoldoffTicks;
+    //! Consecutive ticks a pending downlink has been blocked by the RX lease
+    U32 m_txStarvedTicks;
 
     RadioState m_state;        //!< Radio management state
     U32 m_resetTicks;          //!< Ticks elapsed in the current reset phase

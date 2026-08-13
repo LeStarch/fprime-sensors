@@ -84,6 +84,11 @@ TEST(OffNominal, TransmitDroppedWhenBusy) {
     tester.test_transmit_dropped_when_busy();
 }
 
+TEST(OffNominal, DownlinkStarvationRecovery) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_downlink_starvation_recovery();
+}
+
 TEST(Nominal, Receive) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_receive();
@@ -142,6 +147,26 @@ TEST(Nominal, TransmitModeSettle) {
 TEST(Nominal, TransmitDisabled) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_transmit_disabled();
+}
+
+TEST(Nominal, TransmitEnableIdempotent) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_enable_idempotent();
+}
+
+TEST(OffNominal, ResetDuringTransmit) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_reset_during_transmit();
+}
+
+TEST(OffNominal, StaleSyncRecovery) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_stale_sync_recovery();
+}
+
+TEST(Nominal, LocalHoldOrdering) {
+    Rfm69::Rfm69ManagerTester tester(true);
+    tester.test_local_hold_ordering();
 }
 
 int main(int argc, char** argv) {
