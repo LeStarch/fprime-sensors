@@ -36,6 +36,30 @@ module Rfm69 {
         Receive
     }
 
+    @ Reason a staged downlink packet was not sent.
+    enum Rfm69SendFailure : U8 {
+        @ Payload was empty or exceeded the 255-byte RFM69 packet limit
+        INVALID_SIZE
+        @ SPI error or mode/PacketSent timeout; the radio was recovered to RX
+        RADIO_FAULT
+        @ Local pending-transmit hold was full (ground station only)
+        QUEUE_FULL
+    }
+
+    @ Radio bring-up progress, reported as telemetry.
+    enum Rfm69RadioState : U8 {
+        @ Waiting for FPP parameters to load
+        NOT_STARTED
+        @ Driving / settling the optional hardware reset line
+        RESETTING
+        @ Probing RegVersion over SPI
+        DETECT
+        @ Writing the modem profile and entering receive
+        CONFIGURE
+        @ Receiving; downlink packets accepted
+        READY
+    }
+
     @ Controls whether the radio may leave receive mode to downlink.
     @ DISABLED: receive-only; downlink dataIn returns Com FAILURE (ComQueue pauses).
     @ ENABLED: normal TX; re-enable emits Com SUCCESS to resume the queue.
@@ -116,8 +140,16 @@ module Rfm69 {
             format "Failed to configure RFM69 into mode: {}" throttle 2
 
         @ Event to indicate send failure
-        event SendFailed(status: I32) severity warning high \
+        event SendFailed(reason: Rfm69SendFailure) severity warning high \
             format "Failed to send RFM69 message: {}" throttle 2
+
+        @ Radio detected, configured, and receiving
+        event RadioReady severity activity high \
+            format "RFM69 radio configured and ready"
+
+        @ Radio reset and re-initialization has begun
+        event ResetInitiated severity activity high \
+            format "RFM69 reset initiated"
 
         @ Event to indicate allocation failure
         event AllocationFailed(allocation_size: FwSizeType) severity warning high \
@@ -140,5 +172,8 @@ module Rfm69 {
 
         @ RSSI of last received packet (dBm)
         telemetry LastRssi: F32
+
+        @ Radio bring-up state
+        telemetry RadioState: Rfm69RadioState
     }
 }

@@ -13,3 +13,11 @@ register_fprime_module(
         "${CMAKE_CURRENT_LIST_DIR}/Rfm69Sim.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/Rfm69SimModel.cpp"
 )
+
+register_fprime_ut(
+    AUTOCODER_INPUTS
+        "${CMAKE_CURRENT_LIST_DIR}/Rfm69Sim.fpp"
+    SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/test/ut/Rfm69SimModelTestMain.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/Rfm69SimModel.cpp"
+)

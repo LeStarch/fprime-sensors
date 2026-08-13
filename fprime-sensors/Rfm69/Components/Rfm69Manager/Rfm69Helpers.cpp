@@ -8,7 +8,6 @@
 // ======================================================================
 
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Manager.hpp"
-#include <Fw/Logger/Logger.hpp>
 #include <cstring>
 
 namespace Rfm69 {
@@ -95,11 +94,6 @@ bool Rfm69Manager ::configureRadio() {
         this->m_rxActivePollDivisor = 1;
         this->m_txTimeoutTicks = 3000;
     }
-#ifdef __ZEPHYR__
-    // Zephyr GS owns SPI on the only bridge thread — poll every tick.
-    this->m_rxIdlePollDivisor = 1;
-    this->m_rxActivePollDivisor = 1;
-#endif
     this->m_rxPollTicks = 0;
 
     // Frf register value: frequency / (32 MHz / 2^19) (datasheet section 4.2.4)
@@ -122,11 +116,11 @@ bool Rfm69Manager ::configureRadio() {
         {Reg::OCP, Pa::OCP_NORMAL},
         {Reg::RX_BW, bandwidth.rxBw},
         {Reg::AFC_BW, bandwidth.afcBw},
-        {Reg::DIO_MAPPING_2, 0x07},  // CLKOUT off
-        {Reg::RSSI_THRESH, 0xE4},    // Recommended default
+        {Reg::DIO_MAPPING_2, DIO_MAPPING_2_CLKOUT_OFF},
+        {Reg::RSSI_THRESH, RSSI_THRESH_VALUE},
         {Reg::PREAMBLE_MSB, static_cast<U8>(packet.preambleBytes >> 8)},
         {Reg::PREAMBLE_LSB, static_cast<U8>(packet.preambleBytes & 0xFF)},
-        {Reg::SYNC_CONFIG, 0xB8},  // Sync on, 8 sync bytes
+        {Reg::SYNC_CONFIG, SYNC_CONFIG_VALUE},
         {Reg::SYNC_VALUE_1, packet.sync[0]},
         {Reg::SYNC_VALUE_2, packet.sync[1]},
         {Reg::SYNC_VALUE_3, packet.sync[2]},
@@ -137,7 +131,7 @@ bool Rfm69Manager ::configureRadio() {
         {Reg::SYNC_VALUE_8, packet.sync[7]},
         {Reg::PACKET_CONFIG_1, packet.packetConfig1},  // Variable length, whitening, CRC
         {Reg::PAYLOAD_LENGTH, static_cast<U8>(MAX_PACKET_PAYLOAD)},
-        {Reg::FIFO_THRESH, static_cast<U8>(0x80 | packet.fifoThreshold)},
+        {Reg::FIFO_THRESH, static_cast<U8>(TX_START_FIFO_NOT_EMPTY | packet.fifoThreshold)},
         {Reg::PACKET_CONFIG_2, packet.packetConfig2},
         {Reg::TEST_PA_1, Pa::TEST_PA_1_NORMAL},
         {Reg::TEST_PA_2, Pa::TEST_PA_2_NORMAL},
@@ -252,14 +246,12 @@ bool Rfm69Manager ::readFifo(U8* data, FwSizeType size) {
     FW_ASSERT(data != nullptr);
     FW_ASSERT((size + 1) <= sizeof this->m_mosi, static_cast<FwAssertArgType>(size));
 
-    // The Raspberry Pi SPI0/RFM69 wiring used by the reference deployment
-    // reproducibly samples bit 7 high on the fourth FIFO data byte of a long
-    // read. The RFM69 CRC still passes because it validates the RF packet before
-    // this SPI transfer. Keep every transaction below that boundary. The caller
-    // limits a scheduler tick to RX_FIFO_DRAIN_CHUNK, so this remains a bounded
-    // number of small ioctls rather than an airtime polling loop.
+    // Some SPI transports corrupt long FIFO read transactions (see the
+    // RX_FIFO_SPI_CHUNK documentation), so the read is split into short
+    // transfers. The loop bound is provable: each iteration transfers at
+    // least one byte, so at most MAX_PACKET_PAYLOAD iterations occur.
     FwSizeType offset = 0;
-    while (offset < size) {
+    for (FwSizeType i = 0; (i < MAX_PACKET_PAYLOAD) && (offset < size); i++) {
         const FwSizeType chunk = FW_MIN(size - offset, RX_FIFO_SPI_CHUNK);
         this->m_mosi[0] = Reg::FIFO;
         (void)::memset(&this->m_mosi[1], 0, chunk);
@@ -271,11 +263,11 @@ bool Rfm69Manager ::readFifo(U8* data, FwSizeType size) {
         (void)::memcpy(data + offset, &this->m_miso[1], chunk);
         offset += chunk;
     }
-    return true;
+    return offset == size;
 }
 
 void Rfm69Manager ::abortTransmit() {
-    this->log_WARNING_HI_SendFailed(-1);
+    this->log_WARNING_HI_SendFailed(Rfm69SendFailure::RADIO_FAULT);
     this->m_txWaitTicks = 0;
     this->m_txState = TX_ABORT_CLEAR_FIFO;
 }

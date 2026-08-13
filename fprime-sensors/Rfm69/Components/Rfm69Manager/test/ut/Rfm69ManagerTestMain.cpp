@@ -124,6 +124,21 @@ TEST(OffNominal, ReceiveCrcDrop) {
     tester.test_receive_crc_drop();
 }
 
+TEST(OffNominal, DetectionRadioAbsent) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_detection_radio_absent();
+}
+
+TEST(OffNominal, TransmitChannelBusy) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_channel_busy();
+}
+
+TEST(Nominal, TransmitModeSettle) {
+    Rfm69::Rfm69ManagerTester tester;
+    tester.test_transmit_mode_settle();
+}
+
 TEST(Nominal, TransmitDisabled) {
     Rfm69::Rfm69ManagerTester tester;
     tester.test_transmit_disabled();

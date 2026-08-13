@@ -11,6 +11,10 @@ namespace Rfm69 {
 Rfm69SimModel::Rfm69SimModel()
     : m_registerWriteCount(0),
       m_fifoCount(0),
+      m_modeSettleByteTimes(0),
+      m_modeSettleRemaining(0),
+      m_radioPresent(true),
+      m_channelBusy(false),
       m_packetSent(false),
       m_payloadReady(false),
       m_fifoOverrun(false),
@@ -23,6 +27,7 @@ Rfm69SimModel::Rfm69SimModel()
       m_rxTotal(0),
       m_rxDelivered(0),
       m_rxCorrupt(false),
+      m_rxGapRemaining(0),
       m_airCount(0),
       m_txCount(0) {
     this->reset();
@@ -58,6 +63,8 @@ void Rfm69SimModel::reset() {
     this->m_registers[Reg::PACKET_CONFIG_2] = 0x02;
     this->m_fifoCount = 0;
     this->m_registerWriteCount = 0;
+    this->m_modeSettleRemaining = this->m_modeSettleByteTimes;
+    this->m_channelBusy = false;
     this->m_packetSent = false;
     this->m_payloadReady = false;
     this->m_fifoOverrun = false;
@@ -70,12 +77,18 @@ void Rfm69SimModel::reset() {
     this->m_rxTotal = 0;
     this->m_rxDelivered = 0;
     this->m_rxCorrupt = false;
+    this->m_rxGapRemaining = 0;
     this->m_airCount = 0;
     this->m_txCount = 0;
 }
 
 void Rfm69SimModel::spiTransaction(const U8* mosi, U8* miso, FwSizeType size) {
     if ((mosi == nullptr) || (miso == nullptr) || (size == 0)) {
+        return;
+    }
+    // An absent or unpowered radio drives MISO low and latches nothing
+    if (!this->m_radioPresent) {
+        (void)::memset(miso, 0, size);
         return;
     }
     // Each SPI byte exchanged advances the modeled air interface one byte
@@ -166,6 +179,22 @@ void Rfm69SimModel::setPacketSentStall(bool stall) {
     this->m_stallPacketSent = stall;
 }
 
+void Rfm69SimModel::setModeSettleByteTimes(FwSizeType byteTimes) {
+    this->m_modeSettleByteTimes = byteTimes;
+}
+
+void Rfm69SimModel::setRadioPresent(bool present) {
+    this->m_radioPresent = present;
+}
+
+void Rfm69SimModel::setRssiReadback(U8 value) {
+    this->m_registers[Reg::RSSI_VALUE] = value;
+}
+
+void Rfm69SimModel::setChannelBusy(bool busy) {
+    this->m_channelBusy = busy;
+}
+
 void Rfm69SimModel::clearRegisterWriteHistory() {
     this->m_registerWriteCount = 0;
 }
@@ -183,6 +212,11 @@ bool Rfm69SimModel::wasRegisterWritten(U8 address, U8 value) const {
 void Rfm69SimModel::advanceClock(FwSizeType byteTimes) {
     const U8 mode = this->m_registers[Reg::OP_MODE] & Mode::MASK;
     for (FwSizeType t = 0; t < byteTimes; t++) {
+        // Oscillator/PLL settling: no packet engine activity until ModeReady
+        if (this->m_modeSettleRemaining > 0) {
+            this->m_modeSettleRemaining--;
+            continue;
+        }
         if (mode == Mode::TX) {
             if (!this->m_txActive && (this->m_fifoCount > 0)) {
                 this->startTransmit();
@@ -211,13 +245,20 @@ void Rfm69SimModel::advanceClock(FwSizeType byteTimes) {
             }
         } else if (mode == Mode::RX) {
             if (!this->m_rxActive && !this->m_rxRestartPending) {
-                this->startReceive();
+                // Each over-the-air frame is preceded by preamble and sync
+                // byte times during which no payload bytes arrive
+                if (this->m_rxGapRemaining > 0) {
+                    this->m_rxGapRemaining--;
+                } else {
+                    this->startReceive();
+                }
             }
             if (this->m_rxActive && (this->m_fifoCount < FIFO_SIZE)) {
                 this->fifoPush(this->m_rxPacket[this->m_rxDelivered]);
                 this->m_rxDelivered++;
                 if (this->m_rxDelivered >= this->m_rxTotal) {
                     this->m_rxActive = false;
+                    this->m_rxGapRemaining = RX_INTER_PACKET_GAP;
                     // A CRC-failing frame never asserts PayloadReady (the RFM69
                     // auto-clears on CRC failure). Leave the streamed bytes in
                     // the FIFO so FifoLevel stays asserted through the final read,
@@ -303,6 +344,7 @@ void Rfm69SimModel::writeRegister(U8 address, U8 value) {
 }
 
 void Rfm69SimModel::handleModeChange(U8 mode) {
+    this->m_modeSettleRemaining = this->m_modeSettleByteTimes;
     if (mode == Mode::TX) {
         // PayloadReady is an RX flag; leaving RX abandons any reception
         this->m_payloadReady = false;
@@ -337,6 +379,13 @@ U8 Rfm69SimModel::fifoPop() {
         value = this->m_fifo[0];
         this->m_fifoCount--;
         (void)::memmove(this->m_fifo, &this->m_fifo[1], this->m_fifoCount);
+        // PayloadReady clears when the FIFO is emptied (datasheet Table 25).
+        // The next queued frame's preamble/sync gap starts no earlier than
+        // this, giving the host its inter-packet handling window.
+        if ((this->m_fifoCount == 0) && !this->m_rxActive) {
+            this->m_payloadReady = false;
+            this->m_rxGapRemaining = RX_INTER_PACKET_GAP;
+        }
     }
     return value;
 }
@@ -375,14 +424,17 @@ void Rfm69SimModel::startReceive() {
 }
 
 U8 Rfm69SimModel::irqFlags1() const {
-    // The simulated radio settles instantaneously: ModeReady is always set
+    // ModeReady deasserts while the modeled oscillator/PLL settles
+    if (this->m_modeSettleRemaining > 0) {
+        return 0;
+    }
     U8 flags = IrqFlags1::MODE_READY;
     const U8 mode = this->m_registers[Reg::OP_MODE] & Mode::MASK;
     if (mode == Mode::RX) {
         flags |= IrqFlags1::RX_READY;
-        // A reception in progress asserts SyncAddressMatch and Rssi until
-        // the payload is delivered and drained
-        if (this->m_rxActive || this->m_payloadReady || (this->m_fifoCount > 0)) {
+        // A reception in progress (or a busy channel) asserts SyncAddressMatch
+        // and Rssi until the payload is delivered and drained
+        if (this->m_rxActive || this->m_payloadReady || (this->m_fifoCount > 0) || this->m_channelBusy) {
             flags |= IrqFlags1::SYNC_ADDRESS_MATCH | IrqFlags1::RSSI;
         }
     } else if (mode == Mode::TX) {

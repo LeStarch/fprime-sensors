@@ -56,13 +56,23 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     ~Rfm69Manager();
 
   private:
-    //! Software lifecycle: DETECT → CONFIGURE → READY
-    //! (advanced at parametersLoaded; run retries after RESET / param updates)
+    //! Software lifecycle, advanced one bounded step per run tick:
+    //! RESET_ASSERT → RESET_HOLD → RESET_SETTLE → DETECT → CONFIGURE → READY.
+    //! RESET / parameter updates re-enter earlier states; run retries failures.
     enum RadioState {
-        DETECT,     //!< Looking for RegVersion on SPI
-        CONFIGURE,  //!< Writing profile + entering RX
-        READY       //!< Polling RX / accepting TX
+        RESET_ASSERT,  //!< Drive the optional RST line HIGH (skip if unwired)
+        RESET_HOLD,    //!< Hold RST HIGH for RESET_HOLD_TICKS, then drive LOW
+        RESET_SETTLE,  //!< Wait RESET_SETTLE_TICKS after releasing RST
+        DETECT,        //!< Looking for RegVersion on SPI
+        CONFIGURE,     //!< Writing profile + entering RX
+        READY          //!< Polling RX / accepting TX
     };
+
+    //! RST must be held HIGH at least 100 us (datasheet section 7.2.2); one
+    //! 1 kHz tick provides 1 ms with margin.
+    static constexpr U32 RESET_HOLD_TICKS = 1;
+    //! The radio needs 5 ms after RST release before use (datasheet 7.2.2).
+    static constexpr U32 RESET_SETTLE_TICKS = 6;
 
     //! Non-blocking downlink sequence. No state performs an airtime wait: the
     //! 1 kHz scheduler advances the sequence with bounded SPI transactions.
@@ -149,10 +159,12 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Abort an in-progress drain and re-arm the receiver
     void abortReceiveDrain();
 
-    //! Request a reset pulse from the platform GPIO driver, if connected.
-    //! \return true if unconnected or the HIGH/LOW pulse succeeded; false on
-    //!         GPIO error. Callers must not treat false as fatal — reset is optional.
-    bool pulseReset();
+    //! Enter the tick-driven hardware reset sequence (or DETECT when the
+    //! optional RST line is unwired), clearing any in-progress RX drain.
+    void beginResetSequence();
+
+    //! Map the internal lifecycle state to telemetry and write the channel.
+    void reportRadioState();
 
     //! Stage one native RF packet for scheduler-driven transmission.
     bool startTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context);
@@ -173,9 +185,6 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
 
     //! Enter bounded abort recovery after a transmit SPI/timeout failure.
     void abortTransmit();
-
-    //! Non-blocking bus lock for run: returns false if TX (or other owner) holds it
-    bool tryAcquireBus();
 
     // ----------------------------------------------------------------------
     // Helper functions: RFM69 register access (Rfm69Helpers.cpp)
@@ -291,12 +300,12 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     U32 m_txTxHoldoffTicks;
 
     RadioState m_state;        //!< Radio management state
+    U32 m_resetTicks;          //!< Ticks elapsed in the current reset phase
     bool m_configured;         //!< FPP parameters have been loaded
     U32 m_packetsTransmitted;  //!< Count of transmitted packets
     U32 m_packetsReceived;     //!< Count of received packets
     U32 m_rxCrcErrors;         //!< Count of RX frames dropped for failing CRC
     TransmitState m_transmitEnabled;  //!< Whether downlink transmit is permitted
-    bool m_resetPulsed;                //!< True once optional RST was attempted (success or fail)
     bool m_comStatusAnnounced;          //!< Initial link-ready status has been sent
     //! Set after reporting FAILURE so run can emit SUCCESS when downlink is
     //! allowed again (holdoff expired, radio ready).

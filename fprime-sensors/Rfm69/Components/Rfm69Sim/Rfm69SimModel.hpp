@@ -32,6 +32,9 @@ class Rfm69SimModel {
     static constexpr U8 RSSI_READBACK = 0x50;
     //! Bound on non-FIFO register writes retained for white-box assertions
     static constexpr FwSizeType REGISTER_WRITE_HISTORY_SIZE = 64;
+    //! Byte times between queued air packets, modeling the preamble (4) and
+    //! sync word (8) that precede every over-the-air frame
+    static constexpr FwSizeType RX_INTER_PACKET_GAP = 12;
 
     Rfm69SimModel();
 
@@ -71,6 +74,22 @@ class Rfm69SimModel {
     //! was last cleared. This exposes transient radio controls such as the
     //! DBM_20 TestPa boost without changing the simulation's functional API.
     bool wasRegisterWritten(U8 address, U8 value) const;
+
+    //! Model oscillator/PLL settling: ModeReady (and RxReady/TxReady) stay
+    //! deasserted for `byteTimes` byte clocks after every mode change, as on
+    //! real hardware (datasheet section 4.2). Zero restores instant settling.
+    void setModeSettleByteTimes(FwSizeType byteTimes);
+
+    //! Model an absent or unpowered radio: SPI reads return zero and writes
+    //! are ignored, exercising the manager's detection and retry paths.
+    void setRadioPresent(bool present);
+
+    //! Set the RSSI register readback (-value/2 dBm).
+    void setRssiReadback(U8 value);
+
+    //! Model a busy RF channel: Rssi and SyncAddressMatch assert while in RX
+    //! even with no packet in delivery, exercising listen-before-talk holdoff.
+    void setChannelBusy(bool busy);
 
   private:
     //! Advance the modeled air interface by a number of byte times
@@ -113,6 +132,12 @@ class Rfm69SimModel {
     U8 m_fifo[FIFO_SIZE];
     FwSizeType m_fifoCount;
 
+    // Fault/behavior injection controls
+    FwSizeType m_modeSettleByteTimes;
+    FwSizeType m_modeSettleRemaining;
+    bool m_radioPresent;
+    bool m_channelBusy;
+
     // IRQ flag state
     bool m_packetSent;
     bool m_payloadReady;
@@ -134,6 +159,8 @@ class Rfm69SimModel {
     //! When set, the in-progress reception is a CRC-failing frame: PayloadReady
     //! is never asserted at completion (the RFM69 auto-clears on CRC failure).
     bool m_rxCorrupt;
+    //! Remaining preamble/sync byte times before the next queued packet starts
+    FwSizeType m_rxGapRemaining;
     U8 m_rxPacket[MAX_PACKET_PAYLOAD + 1];
 
     // Buffered uplink bytes awaiting packetization

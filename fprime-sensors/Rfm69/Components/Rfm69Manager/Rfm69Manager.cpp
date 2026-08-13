@@ -7,15 +7,8 @@
 // ======================================================================
 
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Manager.hpp"
-#include <Fw/Logger/Logger.hpp>
+#include <Os/Mutex.hpp>
 #include <cstring>
-#ifdef __ZEPHYR__
-#include <zephyr/kernel.h>
-#include "fprime-zephyr/Os/Mutex.hpp"
-#else
-#include <Os/Posix/Mutex.hpp>
-#include <pthread.h>
-#endif
 
 namespace Rfm69 {
 
@@ -48,13 +41,13 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_rxStaleSyncTicks(0),
       m_rxTxHoldoffTicks(0),
       m_txTxHoldoffTicks(0),
-      m_state(DETECT),
+      m_state(RESET_ASSERT),
+      m_resetTicks(0),
       m_configured(false),
       m_packetsTransmitted(0),
       m_packetsReceived(0),
       m_rxCrcErrors(0),
       m_transmitEnabled(TransmitState::ENABLED),
-      m_resetPulsed(false),
       m_comStatusAnnounced(false),
       m_comResumeNeeded(false),
       m_mosi{},
@@ -67,21 +60,16 @@ void Rfm69Manager ::parameterUpdated(FwPrmIdType id) {
     // tick (LoRa re-reads params on each enableTx/enableRx instead).
     (void)id;
     Os::ScopeLock lock(this->m_lock);
-    if (this->m_state != DETECT) {
+    if (this->m_state == READY) {
         this->m_state = CONFIGURE;
     }
 }
 
 void Rfm69Manager ::parametersLoaded() {
+    // No SPI or GPIO work here: bring-up (reset pulse, detect, configure) is
+    // advanced one bounded step at a time by run() ticks.
     Os::ScopeLock lock(this->m_lock);
     this->m_configured = true;
-    // Detect/configure before rate groups start so the first run ticks only
-    // poll RX instead of burning SPI ModeReady waits on the 1 kHz budget.
-    this->initializeRadio();
-    if (this->m_state != READY) {
-        Fw::Logger::log("[ERROR] RFM69 radio not ready after startup configure (state=%d)\n",
-                        static_cast<I32>(this->m_state));
-    }
 }
 
 // ----------------------------------------------------------------------
@@ -143,9 +131,6 @@ void Rfm69Manager ::dataReturnIn_handler(FwIndexType portNum, Fw::Buffer& data, 
 }
 
 void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
-    if (!this->tryAcquireBus()) {
-        return;
-    }
     TxProgress txProgress = TX_IN_PROGRESS;
     Fw::Buffer completedBuffer;
     ComCfg::FrameContext completedContext;
@@ -153,7 +138,9 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     Fw::Buffer dropBuffer;
     ComCfg::FrameContext dropContext;
     bool dropPending = false;
-
+    bool resume = false;
+    {
+    Os::ScopeLock lock(this->m_lock);
     if (this->m_txActive) {
         txProgress = this->advanceTransmit();
         if (txProgress != TX_IN_PROGRESS) {
@@ -203,8 +190,8 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     // A failed staged TX first reports FAILURE. Resume is deliberately deferred
     // to a later tick so ComRetry observes an ordered state transition rather
     // than FAILURE and SUCCESS in one synchronous callback chain.
-    const bool resume = txCompleted ? false : this->maybeResumeComStatus();
-    this->m_lock.unLock();
+    resume = txCompleted ? false : this->maybeResumeComStatus();
+    }
     if (txCompleted) {
         this->dataReturnOut_out(0, completedBuffer, completedContext);
         this->emitComStatus(txProgress == TX_SUCCEEDED ? Fw::Success::SUCCESS : Fw::Success::FAILURE);
@@ -237,19 +224,6 @@ bool Rfm69Manager ::maybeResumeComStatus() {
     return true;
 }
 
-bool Rfm69Manager ::tryAcquireBus() {
-    // Non-blocking try-lock: fails when dataIn holds m_lock for TX.
-#ifdef __ZEPHYR__
-    auto* handle = reinterpret_cast<Os::Zephyr::Mutex::ZephyrMutexHandle*>(this->m_lock.getHandle());
-    const int status = k_mutex_lock(&handle->m_mutex_descriptor, K_NO_WAIT);
-    return status == 0;
-#else
-    auto* handle = reinterpret_cast<Os::Posix::Mutex::PosixMutexHandle*>(this->m_lock.getHandle());
-    const int status = pthread_mutex_trylock(&handle->m_mutex_descriptor);
-    return status == 0;
-#endif
-}
-
 // ----------------------------------------------------------------------
 // Helper functions: radio state management
 // ----------------------------------------------------------------------
@@ -259,43 +233,103 @@ void Rfm69Manager ::initializeRadio() {
     if (!this->m_configured) {
         return;
     }
-    if (this->m_state == DETECT) {
-        // Optional hardware RST (recommended when a reset GPIO is wired — cold
-        // power-up / shared-SPI glitches can leave the HCW in a bad state).
-        // Never required: skip if unconnected, and still detect if the pulse fails.
-        if (!this->m_resetPulsed) {
-            (void)this->pulseReset();
-            this->m_resetPulsed = true;
-        }
-        if (this->detectRadio()) {
-            this->m_state = CONFIGURE;
-        } else {
-            this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
-            return;
-        }
-    }
-    if (this->m_state == CONFIGURE) {
-        if (this->configureRadio() && this->setMode(Mode::RX)) {
-            this->m_state = READY;
-            // Com status is a one-time startup handshake. Sending an extra
-            // SUCCESS after a hardware reset is invalid while the downstream
-            // aggregator is already READY and causes it to assert.
-            if (!this->m_comStatusAnnounced && this->isConnected_comStatusOut_OutputPort(0)) {
-                Fw::Success ready = Fw::Success::SUCCESS;
-                this->comStatusOut_out(0, ready);
-                this->m_comStatusAnnounced = true;
+    switch (this->m_state) {
+        case RESET_ASSERT:
+            // Optional hardware RST (recommended when a reset GPIO is wired —
+            // cold power-up / shared-SPI glitches can leave the HCW in a bad
+            // state). Never required: skip if unconnected or the write fails.
+            if (this->isConnected_resetGpio_OutputPort(0) &&
+                (this->resetGpio_out(0, Fw::Logic::HIGH) == Drv::GpioStatus::OP_OK)) {
+                this->m_resetTicks = 0;
+                this->m_state = RESET_HOLD;
+            } else {
+                this->m_state = DETECT;
             }
-        } else {
-            this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
-        }
+            this->reportRadioState();
+            break;
+        case RESET_HOLD:
+            if (++this->m_resetTicks >= RESET_HOLD_TICKS) {
+                (void)this->resetGpio_out(0, Fw::Logic::LOW);
+                this->m_resetTicks = 0;
+                this->m_state = RESET_SETTLE;
+            }
+            break;
+        case RESET_SETTLE:
+            if (++this->m_resetTicks >= RESET_SETTLE_TICKS) {
+                this->m_state = DETECT;
+                this->reportRadioState();
+            }
+            break;
+        case DETECT:
+            if (this->detectRadio()) {
+                this->m_state = CONFIGURE;
+                this->reportRadioState();
+            } else {
+                this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
+            }
+            break;
+        case CONFIGURE:
+            if (this->configureRadio() && this->setMode(Mode::RX)) {
+                this->m_state = READY;
+                this->reportRadioState();
+                this->log_ACTIVITY_HI_RadioReady();
+                // Com status is a one-time startup handshake. Sending an extra
+                // SUCCESS after a hardware reset is invalid while the downstream
+                // aggregator is already READY and causes it to assert.
+                if (!this->m_comStatusAnnounced && this->isConnected_comStatusOut_OutputPort(0)) {
+                    Fw::Success ready = Fw::Success::SUCCESS;
+                    this->comStatusOut_out(0, ready);
+                    this->m_comStatusAnnounced = true;
+                }
+            } else {
+                this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
+            }
+            break;
+        case READY:
+        default:
+            break;
     }
+}
+
+void Rfm69Manager ::beginResetSequence() {
+    this->m_state = RESET_ASSERT;
+    this->m_resetTicks = 0;
+    this->m_rxDraining = false;
+    this->m_rxLength = 0;
+    this->m_rxReceived = 0;
+    this->m_rxPollTicks = 0;
+    this->m_rxStaleSyncTicks = 0;
+    this->reportRadioState();
+}
+
+void Rfm69Manager ::reportRadioState() {
+    Rfm69RadioState state = Rfm69RadioState::NOT_STARTED;
+    switch (this->m_state) {
+        case RESET_ASSERT:
+        case RESET_HOLD:
+        case RESET_SETTLE:
+            state = Rfm69RadioState::RESETTING;
+            break;
+        case DETECT:
+            state = Rfm69RadioState::DETECT;
+            break;
+        case CONFIGURE:
+            state = Rfm69RadioState::CONFIGURE;
+            break;
+        case READY:
+            state = Rfm69RadioState::READY;
+            break;
+        default:
+            break;
+    }
+    this->tlmWrite_RadioState(state);
 }
 
 bool Rfm69Manager ::startTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context) {
     // One Com buffer → one RF packet (1..255). No radio-layer split/reassembly.
     const FwSizeType size = data.getSize();
     if ((size == 0) || (size > MAX_PACKET_PAYLOAD)) {
-        this->log_WARNING_HI_SendFailed(static_cast<I32>(size));
+        this->log_WARNING_HI_SendFailed(Rfm69SendFailure::INVALID_SIZE);
         return false;
     }
     this->m_txBuffer = data;
@@ -317,7 +351,7 @@ bool Rfm69Manager ::usesLocalTxHold() const {
 
 bool Rfm69Manager ::enqueuePendingTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context) {
     if (this->m_pendingTxCount >= PENDING_TX_DEPTH) {
-        this->log_WARNING_HI_SendFailed(-1);
+        this->log_WARNING_HI_SendFailed(Rfm69SendFailure::QUEUE_FULL);
         return false;
     }
     this->m_pendingTxBuffers[this->m_pendingTxCount] = data;
@@ -382,36 +416,12 @@ void Rfm69Manager ::TRANSMIT_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, const R
 void Rfm69Manager ::RESET_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
     {
         Os::ScopeLock lock(this->m_lock);
-        // Best-effort GPIO pulse (no-op if unconnected). Soft re-detect always
-        // proceeds so RESET works on platforms without a wired RST line.
-        (void)this->pulseReset();
-        this->m_resetPulsed = true;
-        this->m_state = DETECT;
-        this->m_rxDraining = false;
-        this->m_rxLength = 0;
-        this->m_rxReceived = 0;
-        this->m_rxPollTicks = 0;
-        this->m_rxStaleSyncTicks = 0;
+        // Tick-driven: the optional RST pulse and re-detect are advanced one
+        // bounded step per run() tick, so no command-context blocking occurs.
+        this->beginResetSequence();
     }
+    this->log_ACTIVITY_HI_ResetInitiated();
     this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
-}
-
-bool Rfm69Manager ::pulseReset() {
-    // Optional: simulation and boards that reset externally leave this port
-    // disconnected; treat that as success so callers can continue bring-up.
-    if (!this->isConnected_resetGpio_OutputPort(0)) {
-        return true;
-    }
-    Drv::GpioStatus status = this->resetGpio_out(0, Fw::Logic::HIGH);
-    if (status == Drv::GpioStatus::OP_OK) {
-        (void)Os::Task::delay(Fw::TimeInterval(0, 10000));
-        status = this->resetGpio_out(0, Fw::Logic::LOW);
-    }
-    if (status == Drv::GpioStatus::OP_OK) {
-        (void)Os::Task::delay(Fw::TimeInterval(0, 10000));
-        return true;
-    }
-    return false;
 }
 
 void Rfm69Manager ::pollReceive() {

@@ -115,6 +115,15 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     //! TRANSMIT command gives a commandable receive-only window
     void test_transmit_disabled();
 
+    //! An absent (unpowered) radio is not detected; recovery follows power-up
+    void test_detection_radio_absent();
+
+    //! A busy RF channel (carrier sensed) defers downlink until clear
+    void test_transmit_channel_busy();
+
+    //! Oscillator/PLL settling delays (ModeReady latency) are tolerated
+    void test_transmit_mode_settle();
+
     private:
     // ----------------------------------------------------------------------
     // Handlers for typed from ports
@@ -134,6 +143,12 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
 
     //! Bring the component to the READY state
     void makeReady();
+
+    //! Invoke the scheduler tick a fixed number of times
+    void runTicks(U32 count);
+
+    //! Tick until the radio bring-up sequence reports readiness
+    void runUntilReady(U32 maxTicks = 64);
 
     //! Advance run ticks until a staged TX reports SUCCESS or FAILURE.
     void runUntilTransmitCompletes(U32 maxTicks = 4096);

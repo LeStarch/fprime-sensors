@@ -132,6 +132,14 @@ constexpr FwSizeType MAX_PACKET_PAYLOAD = 255;
 //! Bytes safe to burst-write while FifoLevel reads clear. At most
 //! FIFO_THRESHOLD bytes remain, so this fills to at most 64 of 66 bytes.
 constexpr FwSizeType TX_TOP_UP_CHUNK = FIFO_SIZE - FIFO_THRESHOLD - 2;
+//! RegSyncConfig: SyncOn, FifoFillCondition=sync, 8 sync bytes, no error tolerance
+constexpr U8 SYNC_CONFIG_VALUE = 0xB8;
+//! RegRssiThresh recommended default (datasheet section 3.4.9): -114 dBm
+constexpr U8 RSSI_THRESH_VALUE = 0xE4;
+//! RegDioMapping2 with CLKOUT disabled (ClkOut=off)
+constexpr U8 DIO_MAPPING_2_CLKOUT_OFF = 0x07;
+//! RegFifoThresh TxStartCondition bit: start TX on FifoNotEmpty
+constexpr U8 TX_START_FIFO_NOT_EMPTY = 0x80;
 //! Frf register step size: 32 MHz crystal / 2^19 (datasheet section 4.2.4)
 constexpr U32 CRYSTAL_HZ = 32000000;
 constexpr U32 FRF_DIVISOR = 524288;  //!< 2^19
