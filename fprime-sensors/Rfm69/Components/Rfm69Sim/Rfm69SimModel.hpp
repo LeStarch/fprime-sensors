@@ -35,6 +35,9 @@ class Rfm69SimModel {
     //! Byte times between queued air packets, modeling the preamble (4) and
     //! sync word (8) that precede every over-the-air frame
     static constexpr FwSizeType RX_INTER_PACKET_GAP = 12;
+    //! SPI byte clocks per air byte: the RF bit rate is slower than the SPI
+    //! clock, so the host can always drain faster than the air fills
+    static constexpr FwSizeType AIR_CLOCK_DIVISOR = 2;
 
     Rfm69SimModel();
 
@@ -161,6 +164,8 @@ class Rfm69SimModel {
     bool m_rxCorrupt;
     //! Remaining preamble/sync byte times before the next queued packet starts
     FwSizeType m_rxGapRemaining;
+    //! SPI byte clock counter used to derive the slower air byte clock
+    FwSizeType m_airClock;
     U8 m_rxPacket[MAX_PACKET_PAYLOAD + 1];
 
     // Buffered uplink bytes awaiting packetization

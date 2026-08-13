@@ -344,6 +344,113 @@ TEST_F(Rfm69SimModelTest, RxRestartFlushesAndAllowsNextPacket) {
     EXPECT_EQ(this->readReg(Reg::FIFO), sizeof second);
 }
 
+TEST_F(Rfm69SimModelTest, ReceiveMultipleQueuedPackets) {
+    this->enterMode(Mode::RX);
+    // 20 bytes queue as a 20-byte frame; a later injection queues separately
+    U8 first[20];
+    for (FwSizeType i = 0; i < sizeof first; i++) {
+        first[i] = static_cast<U8>(i + 1);
+    }
+    this->model.injectAirData(first, sizeof first);
+    U8 flags2 = 0;
+    for (FwSizeType i = 0; (i < 64) && ((flags2 & IrqFlags2::PAYLOAD_READY) == 0); i++) {
+        flags2 = this->readReg(Reg::IRQ_FLAGS_2);
+    }
+    ASSERT_NE(flags2 & IrqFlags2::PAYLOAD_READY, 0);
+    const U8 second[5] = {0xB1, 0xB2, 0xB3, 0xB4, 0xB5};
+    this->model.injectAirData(second, sizeof second);
+    // Drain the first frame completely
+    ASSERT_EQ(this->readReg(Reg::FIFO), sizeof first);
+    for (FwSizeType i = 0; i < sizeof first; i++) {
+        EXPECT_EQ(this->readReg(Reg::FIFO), first[i]);
+    }
+    // PayloadReady clears once the FIFO empties; the next frame follows
+    // after the modeled preamble/sync gap
+    EXPECT_EQ(this->readReg(Reg::IRQ_FLAGS_2) & IrqFlags2::PAYLOAD_READY, 0);
+    flags2 = 0;
+    for (FwSizeType i = 0; (i < 64) && ((flags2 & IrqFlags2::PAYLOAD_READY) == 0); i++) {
+        flags2 = this->readReg(Reg::IRQ_FLAGS_2);
+    }
+    ASSERT_NE(flags2 & IrqFlags2::PAYLOAD_READY, 0);
+    ASSERT_EQ(this->readReg(Reg::FIFO), sizeof second);
+    for (FwSizeType i = 0; i < sizeof second; i++) {
+        EXPECT_EQ(this->readReg(Reg::FIFO), second[i]);
+    }
+}
+
+TEST_F(Rfm69SimModelTest, ReceiveOverrunRecoversViaRxRestart) {
+    this->enterMode(Mode::RX);
+    // A frame larger than the FIFO overruns when the host never drains
+    U8 uplink[120];
+    for (FwSizeType i = 0; i < sizeof uplink; i++) {
+        uplink[i] = static_cast<U8>(i);
+    }
+    this->model.injectAirData(uplink, sizeof uplink);
+    U8 flags2 = 0;
+    for (FwSizeType i = 0; (i < 256) && ((flags2 & IrqFlags2::FIFO_OVERRUN) == 0); i++) {
+        flags2 = this->readReg(Reg::IRQ_FLAGS_2);
+    }
+    ASSERT_NE(flags2 & IrqFlags2::FIFO_OVERRUN, 0);
+    // RxRestart flushes the wreckage and re-arms the receiver
+    const U8 packetConfig2 = this->model.readRegisterValue(Reg::PACKET_CONFIG_2);
+    this->writeReg(Reg::PACKET_CONFIG_2, packetConfig2 | 0x04);
+    EXPECT_EQ(this->readReg(Reg::IRQ_FLAGS_2) & IrqFlags2::FIFO_OVERRUN, 0);
+    EXPECT_EQ(this->readReg(Reg::IRQ_FLAGS_2) & IrqFlags2::FIFO_NOT_EMPTY, 0);
+    const U8 next[3] = {0xD1, 0xD2, 0xD3};
+    this->model.injectAirData(next, sizeof next);
+    flags2 = 0;
+    for (FwSizeType i = 0; (i < 64) && ((flags2 & IrqFlags2::PAYLOAD_READY) == 0); i++) {
+        flags2 = this->readReg(Reg::IRQ_FLAGS_2);
+    }
+    ASSERT_NE(flags2 & IrqFlags2::PAYLOAD_READY, 0);
+    EXPECT_EQ(this->readReg(Reg::FIFO), sizeof next);
+}
+
+TEST_F(Rfm69SimModelTest, TransmitQueueOverflowDropsExcess) {
+    // Fill the retrieval queue past its depth: extra packets are dropped
+    for (FwSizeType packet = 0; packet < (Rfm69SimModel::TX_QUEUE_DEPTH + 2); packet++) {
+        this->enterMode(Mode::STANDBY);
+        this->writeReg(Reg::IRQ_FLAGS_2, IrqFlags2::FIFO_OVERRUN);  // FIFO flush
+        this->writeReg(Reg::FIFO, 1);
+        this->writeReg(Reg::FIFO, static_cast<U8>(packet));
+        this->enterMode(Mode::TX);
+        U8 flags2 = 0;
+        for (FwSizeType i = 0; (i < 64) && ((flags2 & IrqFlags2::PACKET_SENT) == 0); i++) {
+            flags2 = this->readReg(Reg::IRQ_FLAGS_2);
+        }
+        ASSERT_NE(flags2 & IrqFlags2::PACKET_SENT, 0);
+    }
+    U8 out[MAX_PACKET_PAYLOAD];
+    for (FwSizeType packet = 0; packet < Rfm69SimModel::TX_QUEUE_DEPTH; packet++) {
+        ASSERT_EQ(this->model.retrievePacket(out, sizeof out), 1u);
+        EXPECT_EQ(out[0], static_cast<U8>(packet));
+    }
+    EXPECT_EQ(this->model.retrievePacket(out, sizeof out), 0u);
+}
+
+TEST_F(Rfm69SimModelTest, RegisterWriteHistoryBounded) {
+    this->model.clearRegisterWriteHistory();
+    // Overflow the bounded history; the earliest writes are retained
+    for (FwSizeType i = 0; i < (Rfm69SimModel::REGISTER_WRITE_HISTORY_SIZE + 8); i++) {
+        this->writeReg(Reg::SYNC_VALUE_1, static_cast<U8>(i));
+    }
+    EXPECT_TRUE(this->model.wasRegisterWritten(Reg::SYNC_VALUE_1, 0));
+    EXPECT_FALSE(this->model.wasRegisterWritten(
+        Reg::SYNC_VALUE_1, static_cast<U8>(Rfm69SimModel::REGISTER_WRITE_HISTORY_SIZE + 4)));
+}
+
+TEST_F(Rfm69SimModelTest, InvalidSpiTransactionsIgnored) {
+    U8 mosi[2] = {Reg::VERSION, 0};
+    U8 miso[2] = {0xAA, 0xAA};
+    // Null pointers and zero size must be safely ignored
+    this->model.spiTransaction(nullptr, miso, sizeof miso);
+    this->model.spiTransaction(mosi, nullptr, sizeof mosi);
+    this->model.spiTransaction(mosi, miso, 0);
+    EXPECT_EQ(miso[1], 0xAA);  // untouched
+    // The model still functions normally afterwards
+    EXPECT_EQ(this->readReg(Reg::VERSION), VERSION_VALUE);
+}
+
 // ----------------------------------------------------------------------
 // Fault injection controls
 // ----------------------------------------------------------------------

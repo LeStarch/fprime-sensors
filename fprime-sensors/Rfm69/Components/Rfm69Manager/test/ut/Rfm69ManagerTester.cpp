@@ -359,10 +359,10 @@ void Rfm69ManagerTester ::test_receive_fifo_fit() {
         data[i] = static_cast<U8>((i * 5) & 0xFF);
     }
     this->m_model.injectAirData(data, sizeof data);
-    // The simulated air clock advances on SPI transactions. With the half-FIFO
-    // watermark and an 8-tick idle poll divider, allow enough ticks to cross
-    // FifoLevel and finish the packet.
-    for (U32 tick = 0; tick < 256; tick++) {
+    // The simulated air clock advances at half the SPI byte rate. With the
+    // half-FIFO watermark and an 8-tick idle poll divider, allow enough ticks
+    // to cross FifoLevel and finish the packet.
+    for (U32 tick = 0; tick < 1024; tick++) {
         this->invoke_to_run(0, 0);
         if (this->fromPortHistory_dataOut->size() > 0) {
             break;
@@ -597,7 +597,7 @@ void Rfm69ManagerTester ::test_transmit_dropped_when_busy() {
     // Adaptive idle polling may need several 1 kHz ticks to reach FifoLevel.
     // Post-RX TX holdoff defers the Com SUCCESS resume after delivery.
     this->clearHistory();
-    for (U32 tick = 0; tick < 256; tick++) {
+    for (U32 tick = 0; tick < 1024; tick++) {
         this->invoke_to_run(0, 0);
         if (this->fromPortHistory_dataOut->size() > 0) {
             break;
@@ -704,7 +704,7 @@ void Rfm69ManagerTester ::test_receive_allocation_failure() {
     U8 data[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
     this->m_model.injectAirData(data, sizeof data);
     this->m_allocFail = true;
-    for (U32 tick = 0; tick < 128; tick++) {
+    for (U32 tick = 0; tick < 512; tick++) {
         this->invoke_to_run(0, 0);
     }
     // Packet dropped with an event; nothing delivered downstream
@@ -715,7 +715,7 @@ void Rfm69ManagerTester ::test_receive_allocation_failure() {
     this->m_allocFail = false;
     this->clearHistory();
     this->m_model.injectAirData(data, sizeof data);
-    for (U32 tick = 0; tick < 128; tick++) {
+    for (U32 tick = 0; tick < 512; tick++) {
         this->invoke_to_run(0, 0);
         if (this->fromPortHistory_dataOut->size() > 0) {
             break;
@@ -731,7 +731,7 @@ void Rfm69ManagerTester ::test_receive_crc_drop() {
     // never asserts PayloadReady, exactly as an RFM69 with CrcOn + CrcAutoClear
     // behaves on corruption. The manager must drop it, not forward garbage.
     this->m_model.injectCorruptFrame(40);
-    for (U32 tick = 0; tick < 256; tick++) {
+    for (U32 tick = 0; tick < 1024; tick++) {
         this->invoke_to_run(0, 0);
     }
     // Nothing delivered to the deframer; the drop is counted in telemetry.
@@ -746,7 +746,7 @@ void Rfm69ManagerTester ::test_receive_crc_drop() {
         good[i] = static_cast<U8>(i + 1);
     }
     this->m_model.injectAirData(good, sizeof good);
-    for (U32 tick = 0; tick < 256; tick++) {
+    for (U32 tick = 0; tick < 1024; tick++) {
         this->invoke_to_run(0, 0);
         if (this->fromPortHistory_dataOut->size() > 0) {
             break;

@@ -28,6 +28,7 @@ Rfm69SimModel::Rfm69SimModel()
       m_rxDelivered(0),
       m_rxCorrupt(false),
       m_rxGapRemaining(0),
+      m_airClock(0),
       m_airCount(0),
       m_txCount(0) {
     this->reset();
@@ -78,6 +79,7 @@ void Rfm69SimModel::reset() {
     this->m_rxDelivered = 0;
     this->m_rxCorrupt = false;
     this->m_rxGapRemaining = 0;
+    this->m_airClock = 0;
     this->m_airCount = 0;
     this->m_txCount = 0;
 }
@@ -217,6 +219,11 @@ void Rfm69SimModel::advanceClock(FwSizeType byteTimes) {
             this->m_modeSettleRemaining--;
             continue;
         }
+        // The air interface runs slower than the SPI clock
+        this->m_airClock++;
+        if ((this->m_airClock % AIR_CLOCK_DIVISOR) != 0) {
+            continue;
+        }
         if (mode == Mode::TX) {
             if (!this->m_txActive && (this->m_fifoCount > 0)) {
                 this->startTransmit();
@@ -253,7 +260,13 @@ void Rfm69SimModel::advanceClock(FwSizeType byteTimes) {
                     this->startReceive();
                 }
             }
-            if (this->m_rxActive && (this->m_fifoCount < FIFO_SIZE)) {
+            if (this->m_rxActive) {
+                // A full FIFO does not pause the air: the byte is lost, the
+                // overrun flag latches (fifoPush), and the mangled frame can
+                // no longer pass CRC
+                if (this->m_fifoCount >= FIFO_SIZE) {
+                    this->m_rxCorrupt = true;
+                }
                 this->fifoPush(this->m_rxPacket[this->m_rxDelivered]);
                 this->m_rxDelivered++;
                 if (this->m_rxDelivered >= this->m_rxTotal) {
