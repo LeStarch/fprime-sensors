@@ -451,7 +451,7 @@ void Rfm69Manager ::pollReceive() {
             return;
         }
 
-        if (!this->beginReceiveDrain(flags2)) {
+        if (!this->beginReceiveDrain()) {
             return;
         }
         if (this->continueReceiveDrain()) {
@@ -461,8 +461,7 @@ void Rfm69Manager ::pollReceive() {
     }
 }
 
-bool Rfm69Manager ::beginReceiveDrain(U8 flags2) {
-    (void)flags2;
+bool Rfm69Manager ::beginReceiveDrain() {
     this->updateRssi();
     U8 length = 0;
     if (this->readRegister(Reg::FIFO, length) != Drv::SpiStatus::SPI_OK) {

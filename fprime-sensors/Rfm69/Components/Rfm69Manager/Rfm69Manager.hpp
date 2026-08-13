@@ -151,7 +151,7 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     bool continueReceiveDrain();
 
     //! Start a new drain after validating IRQ flags; returns true if draining
-    bool beginReceiveDrain(U8 flags2);
+    bool beginReceiveDrain();
 
     //! Deliver m_rxPayload[0..m_rxReceived) to the uplink Com path
     void deliverReceivedPacket();

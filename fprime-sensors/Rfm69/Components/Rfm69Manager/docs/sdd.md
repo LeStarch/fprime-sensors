@@ -22,7 +22,11 @@ because the chip FIFO is only 66 bytes).
 | Event | `ConfigurationFailed` | Detect or configure/RX entry failed |
 | Event | `SendFailed` | TX rejected or failed |
 | Event | `AllocationFailed` | RX buffer allocate failed |
+| Event | `RadioReady` | Radio detected, configured, and receiving |
+| Event | `ResetInitiated` | Reset and re-initialization sequence started |
 | Tlm | `PacketsTransmitted`, `PacketsReceived`, `LastRssi` | |
+| Tlm | `RxCrcErrors` | Frames dropped for failing the hardware CRC |
+| Tlm | `RadioState` | Bring-up progress (`RESETTING`/`DETECT`/`CONFIGURE`/`READY`) |
 
 All other modem settings are fixed in `NATIVE_PACKET_PROFILE` / helpers (915 MHz
 FSK, 25 kHz deviation, sync `2D A7…`, `PacketConfig1=0xD0`). Maps live in
