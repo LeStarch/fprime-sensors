@@ -28,12 +28,14 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! file burst refreshes it, so flight cannot begin a queued downlink in the
     //! gap before the next ground chunk (~450 ms in the HIL profile). Once the
     //! burst ends, TX resumes automatically and drains queued TM/events.
-    static constexpr U32 RX_TX_HOLDOFF_TICKS = 600;
-    //! Minimum quiet time between consecutive flight downlink packets. The
-    //! peer must drain the CRC-accepted FIFO, restart RX, and reacquire sync;
-    //! without this gap a short file-uplink handshake can be hidden behind an
-    //! adjacent telemetry packet even though both flight transmissions succeed.
-    static constexpr U32 TX_TX_HOLDOFF_TICKS = 50;
+    //! Ground-station local pending-TX hold ignores this timer (channelBusy only).
+    static constexpr U32 RX_TX_HOLDOFF_TICKS = 500;
+    //! Quiet time between consecutive local transmits (1 kHz ticks). At
+    //! 19.2 kbps a ~150 B packet is ~60 ms on air; the peer then needs to
+    //! drain FIFO, run FileUplink, and re-arm RX. Keep this under the GDS
+    //! file-uplink cooldown (1.0 s) so paced chunks are unchanged and a UART
+    //! burst cannot drain pending TX back-to-back.
+    static constexpr U32 TX_TX_HOLDOFF_TICKS = 500;
 
     // Fixed native-packet modem profile. DATA_RATE, BANDWIDTH_RX, and TX_POWER
     // are the only operator parameters; these values are deliberately compiled
@@ -155,6 +157,17 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Stage one native RF packet for scheduler-driven transmission.
     bool startTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context);
 
+    //! True when this deployment has no ComQueue retry path (comStatusOut unwired).
+    //! Ground-station topologies use a local pending-TX hold instead of dropping.
+    bool usesLocalTxHold() const;
+
+    //! Enqueue one uplink buffer for a later run() tick. Returns false if full.
+    bool enqueuePendingTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context);
+
+    //! If idle and clear, start the oldest pending uplink packet.
+    //! Returns true when dropBuffer/dropContext must be returned after unlock.
+    bool tryStartPendingTransmit(Fw::Buffer& dropBuffer, ComCfg::FrameContext& dropContext);
+
     //! Advance the scheduler-driven transmit sequence by one bounded step.
     TxProgress advanceTransmit();
 
@@ -244,6 +257,15 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     U32 m_txTimeoutTicks;
     bool m_txBoostEnabled;
 
+    //! Local hold used when comStatusOut is unwired (no ComQueue). Mirrors the
+    //! Arduino RadioHead ground-station usbHold/retry behavior for half-duplex.
+    //! Sized to the GS frame-bin pool (8×272) so a short GDS burst cannot
+    //! overflow and drop mid-file CFDP DATA packets (flight ignores this hold).
+    static constexpr U32 PENDING_TX_DEPTH = 8;
+    Fw::Buffer m_pendingTxBuffers[PENDING_TX_DEPTH];
+    ComCfg::FrameContext m_pendingTxContexts[PENDING_TX_DEPTH];
+    U32 m_pendingTxCount;
+
     //! True while streaming a variable-length RX packet across run ticks
     bool m_rxDraining;
     U8 m_rxLength;              //!< Declared payload length from the length byte
@@ -263,8 +285,10 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     U32 m_rxActivePollDivisor;
     //! Consecutive ticks seeing sync+fifo without FifoLevel/PayloadReady
     U32 m_rxStaleSyncTicks;
-    //! Remaining 1 kHz ticks to defer downlink after a completed uplink packet
+    //! Remaining 1 kHz ticks to defer flight downlink after a completed RX
     U32 m_rxTxHoldoffTicks;
+    //! Remaining 1 kHz ticks to defer the next local TX after a completed TX
+    U32 m_txTxHoldoffTicks;
 
     RadioState m_state;        //!< Radio management state
     bool m_configured;         //!< FPP parameters have been loaded

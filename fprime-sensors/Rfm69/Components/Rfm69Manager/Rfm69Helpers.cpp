@@ -95,6 +95,11 @@ bool Rfm69Manager ::configureRadio() {
         this->m_rxActivePollDivisor = 1;
         this->m_txTimeoutTicks = 3000;
     }
+#ifdef __ZEPHYR__
+    // Zephyr GS owns SPI on the only bridge thread — poll every tick.
+    this->m_rxIdlePollDivisor = 1;
+    this->m_rxActivePollDivisor = 1;
+#endif
     this->m_rxPollTicks = 0;
 
     // Frf register value: frequency / (32 MHz / 2^19) (datasheet section 4.2.4)
@@ -226,7 +231,7 @@ bool Rfm69Manager ::channelBusy() {
 }
 
 bool Rfm69Manager ::downlinkBlocked() {
-    return this->channelBusy() || (this->m_rxTxHoldoffTicks > 0);
+    return this->channelBusy() || (this->m_rxTxHoldoffTicks > 0) || (this->m_txTxHoldoffTicks > 0);
 }
 
 // ----------------------------------------------------------------------

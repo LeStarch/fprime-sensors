@@ -34,6 +34,9 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_txElapsedTicks(0),
       m_txTimeoutTicks(250),
       m_txBoostEnabled(false),
+      m_pendingTxBuffers{},
+      m_pendingTxContexts{},
+      m_pendingTxCount(0),
       m_rxDraining(false),
       m_rxLength(0),
       m_rxReceived(0),
@@ -44,6 +47,7 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_rxActivePollDivisor(4),
       m_rxStaleSyncTicks(0),
       m_rxTxHoldoffTicks(0),
+      m_txTxHoldoffTicks(0),
       m_state(DETECT),
       m_configured(false),
       m_packetsTransmitted(0),
@@ -89,26 +93,46 @@ void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const 
     // this handler remains bounded even when a Com SUCCESS callback reaches it
     // synchronously from the 1 kHz rate-group thread.
     bool accepted = false;
+    bool held = false;
     {
         Os::ScopeLock lock(this->m_lock);
         if (this->m_transmitEnabled == TransmitState::DISABLED) {
-            this->m_comResumeNeeded = true;
-        } else if ((this->m_state != READY) || this->m_txActive) {
-            this->log_WARNING_HI_SendFailed(-1);
-            this->m_comResumeNeeded = true;
-        } else if (this->downlinkBlocked()) {
-            // Half-duplex: prefer uplink (RX in progress or post-RX holdoff).
+            // Keep a local hold on GS (no ComQueue); flight reports FAILURE so
+            // ComQueue retries after TRANSMIT is re-enabled.
+            if (this->usesLocalTxHold()) {
+                held = this->enqueuePendingTransmit(data, context);
+            } else {
+                this->m_comResumeNeeded = true;
+            }
+        } else if ((this->m_state != READY) || this->m_txActive || this->channelBusy() ||
+                   (this->usesLocalTxHold() && (this->m_txTxHoldoffTicks > 0))) {
+            // Half-duplex / not ready: ComQueue gets FAILURE; GS holds & retries.
+            // GS still ignores RX_TX_HOLDOFF here (continuous TM would starve
+            // uplink). It does honor TX_TX_HOLDOFF so a UART burst cannot start
+            // the next packet in the same quiet window as the one that just
+            // finished (that was "packet 5 after packet 0" on multi-chunk).
+            if (this->usesLocalTxHold()) {
+                held = this->enqueuePendingTransmit(data, context);
+            } else {
+                // Half-duplex busy is expected during RX/TX. Do not log
+                // SendFailed: that WARNING_HI re-enters ComQueue and collides
+                // with the next ground DATA chunk (FileUplink PacketOutOfOrder).
+                this->m_comResumeNeeded = true;
+            }
+        } else if (this->downlinkBlocked() && !this->usesLocalTxHold()) {
+            // Flight ComQueue path still respects holdoff via FAILURE/resume.
             this->m_comResumeNeeded = true;
         } else {
             accepted = this->startTransmit(data, context);
             if (accepted) {
                 this->m_comResumeNeeded = false;
             } else {
+                // startTransmit only fails on empty/oversized payloads — never hold.
                 this->m_comResumeNeeded = true;
             }
         }
     }
-    if (!accepted) {
+    if (!accepted && !held) {
         this->dataReturnOut_out(0, data, context);
         this->emitComStatus(Fw::Success::FAILURE);
     }
@@ -126,6 +150,9 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     Fw::Buffer completedBuffer;
     ComCfg::FrameContext completedContext;
     bool txCompleted = false;
+    Fw::Buffer dropBuffer;
+    ComCfg::FrameContext dropContext;
+    bool dropPending = false;
 
     if (this->m_txActive) {
         txProgress = this->advanceTransmit();
@@ -140,18 +167,22 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
                 // Do not immediately re-enter dataIn through the synchronous
                 // Com SUCCESS callback. Give the peer time to empty its FIFO,
                 // restart RX, and reacquire the next preamble/sync word.
-                this->m_rxTxHoldoffTicks = TX_TX_HOLDOFF_TICKS;
+                this->m_txTxHoldoffTicks = TX_TX_HOLDOFF_TICKS;
                 this->m_comResumeNeeded = false;
             } else {
                 this->m_comResumeNeeded = true;
             }
         }
     } else if (this->m_state == READY) {
-        const U32 pollDivisor = this->m_rxDraining ? this->m_rxActivePollDivisor : this->m_rxIdlePollDivisor;
-        this->m_rxPollTicks++;
-        if (this->m_rxPollTicks >= pollDivisor) {
-            this->m_rxPollTicks = 0;
-            this->pollReceive();
+        // Drain local GS hold before RX poll so uplink is not starved by TM.
+        dropPending = this->tryStartPendingTransmit(dropBuffer, dropContext);
+        if (!this->m_txActive) {
+            const U32 pollDivisor = this->m_rxDraining ? this->m_rxActivePollDivisor : this->m_rxIdlePollDivisor;
+            this->m_rxPollTicks++;
+            if (this->m_rxPollTicks >= pollDivisor) {
+                this->m_rxPollTicks = 0;
+                this->pollReceive();
+            }
         }
     } else {
         // Startup normally reaches READY in parametersLoaded(). This path
@@ -160,6 +191,13 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     }
     if (this->m_rxTxHoldoffTicks > 0) {
         this->m_rxTxHoldoffTicks--;
+    }
+    if (this->m_txTxHoldoffTicks > 0) {
+        this->m_txTxHoldoffTicks--;
+    }
+    // After holdoff decays, try a held GS uplink before emitting Com SUCCESS.
+    if (!dropPending && !this->m_txActive && (this->m_state == READY)) {
+        dropPending = this->tryStartPendingTransmit(dropBuffer, dropContext);
     }
     // Resume ComQueue after holdoff/TX FAILURE once the radio can accept TX.
     // A failed staged TX first reports FAILURE. Resume is deliberately deferred
@@ -170,6 +208,9 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     if (txCompleted) {
         this->dataReturnOut_out(0, completedBuffer, completedContext);
         this->emitComStatus(txProgress == TX_SUCCEEDED ? Fw::Success::SUCCESS : Fw::Success::FAILURE);
+    }
+    if (dropPending) {
+        this->dataReturnOut_out(0, dropBuffer, dropContext);
     }
     if (resume) {
         this->emitComStatus(Fw::Success::SUCCESS);
@@ -265,6 +306,52 @@ bool Rfm69Manager ::startTransmit(Fw::Buffer& data, const ComCfg::FrameContext& 
     this->m_txBoostEnabled = false;
     this->m_txState = TX_REQUEST_STANDBY;
     this->m_txActive = true;
+    return true;
+}
+
+bool Rfm69Manager ::usesLocalTxHold() const {
+    // Flight wires comStatusOut into ComQueue/ComRetry. The Feather GS does not,
+    // so a busy-radio reject would otherwise permanently drop uplink frames.
+    return !this->isConnected_comStatusOut_OutputPort(0);
+}
+
+bool Rfm69Manager ::enqueuePendingTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context) {
+    if (this->m_pendingTxCount >= PENDING_TX_DEPTH) {
+        this->log_WARNING_HI_SendFailed(-1);
+        return false;
+    }
+    this->m_pendingTxBuffers[this->m_pendingTxCount] = data;
+    this->m_pendingTxContexts[this->m_pendingTxCount] = context;
+    this->m_pendingTxCount++;
+    return true;
+}
+
+bool Rfm69Manager ::tryStartPendingTransmit(Fw::Buffer& dropBuffer, ComCfg::FrameContext& dropContext) {
+    if ((this->m_pendingTxCount == 0) || this->m_txActive) {
+        return false;
+    }
+    if (this->m_transmitEnabled != TransmitState::ENABLED) {
+        return false;
+    }
+    // Pace pending GS uplinks with the post-TX quiet window. RX holdoff is
+    // ignored here so continuous TM cannot pin the pending queue. TX holdoff
+    // is required so a UART burst cannot drain back-to-back.
+    if ((this->m_state != READY) || this->channelBusy() || (this->m_txTxHoldoffTicks > 0)) {
+        return false;
+    }
+    Fw::Buffer data = this->m_pendingTxBuffers[0];
+    ComCfg::FrameContext context = this->m_pendingTxContexts[0];
+    for (U32 i = 1; i < this->m_pendingTxCount; i++) {
+        this->m_pendingTxBuffers[i - 1] = this->m_pendingTxBuffers[i];
+        this->m_pendingTxContexts[i - 1] = this->m_pendingTxContexts[i];
+    }
+    this->m_pendingTxCount--;
+    if (this->startTransmit(data, context)) {
+        return false;
+    }
+    // Permanent reject (empty/oversized): caller returns ownership after unlock.
+    dropBuffer = data;
+    dropContext = context;
     return true;
 }
 
@@ -384,9 +471,10 @@ bool Rfm69Manager ::beginReceiveDrain(U8 flags2) {
 
 bool Rfm69Manager ::continueReceiveDrain() {
     FW_ASSERT(this->m_rxDraining);
-    // Drain at most RX_FIFO_DRAIN_CHUNK per tick. A tight multi-read loop can
-    // empty the FIFO before PayloadReady and clear SyncAddressMatch (datasheet
-    // 5.2.3.1), while a large SPI FIFO read is unreliable on the reference Pi.
+    // One FifoLevel watermark drain per tick while the packet is still arriving.
+    // A tight multi-read loop can empty the FIFO before PayloadReady and clear
+    // SyncAddressMatch (datasheet 5.2.3.1), corrupting the frame. On PayloadReady
+    // (CRC pass) read the remaining tail in one burst.
     U8 flags = 0;
     if (this->readRegister(Reg::IRQ_FLAGS_2, flags) != Drv::SpiStatus::SPI_OK) {
         this->abortReceiveDrain();
@@ -410,8 +498,7 @@ bool Rfm69Manager ::continueReceiveDrain() {
     FwSizeType chunk = 0;
     if ((flags & IrqFlags2::PAYLOAD_READY) != 0) {
         this->m_rxSawPayloadReady = true;
-        chunk = FW_MIN(static_cast<FwSizeType>(RX_FIFO_DRAIN_CHUNK),
-                       static_cast<FwSizeType>(this->m_rxLength) - this->m_rxReceived);
+        chunk = static_cast<FwSizeType>(this->m_rxLength) - this->m_rxReceived;
     } else if ((flags & IrqFlags2::FIFO_LEVEL) != 0) {
         chunk = FW_MIN(static_cast<FwSizeType>(RX_FIFO_DRAIN_CHUNK),
                        static_cast<FwSizeType>(this->m_rxLength) - this->m_rxReceived);
