@@ -4,6 +4,7 @@
 // ======================================================================
 
 #include "fprime-sensors/Rfm69/Components/Rfm69Sim/Rfm69Sim.hpp"
+#include <cstring>
 
 namespace Rfm69 {
 
@@ -43,8 +44,13 @@ void Rfm69Sim ::airReady_handler(FwIndexType portNum) {}
 
 void Rfm69Sim ::drainTransmittedPackets() {
     U8 payload[MAX_PACKET_PAYLOAD + 1];
-    for (FwSizeType size = this->m_model.retrievePacket(payload, sizeof payload); size > 0;
-         size = this->m_model.retrievePacket(payload, sizeof payload)) {
+    // Each retrievePacket consumes one queue entry, so one full pass over the
+    // fixed-depth queue drains everything the model has to offer.
+    for (FwSizeType packet = 0; packet < Rfm69SimModel::TX_QUEUE_DEPTH; packet++) {
+        const FwSizeType size = this->m_model.retrievePacket(payload, sizeof payload);
+        if (size == 0) {
+            break;
+        }
         if (!this->isConnected_airDataOut_OutputPort(0)) {
             continue;
         }
