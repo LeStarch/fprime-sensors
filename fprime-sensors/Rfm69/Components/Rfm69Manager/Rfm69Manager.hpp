@@ -7,8 +7,10 @@
 #define Rfm69_Rfm69Manager_HPP
 
 #include "Os/Mutex.hpp"
+#include "fprime-sensors/Rfm69/Components/Rfm69Manager/BringupMachineStateMachineAc.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69ManagerComponentAc.hpp"
 #include "fprime-sensors/Rfm69/Components/Rfm69Manager/Rfm69Radio.hpp"
+#include "fprime-sensors/Rfm69/Components/Rfm69Manager/TransmitMachineStateMachineAc.hpp"
 
 namespace Rfm69 {
 
@@ -61,50 +63,90 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     ~Rfm69Manager();
 
   private:
-    //! Software lifecycle, advanced one bounded step per run tick:
-    //! RESET_ASSERT → RESET_HOLD → RESET_SETTLE → DETECT → CONFIGURE → READY.
-    //! RESET / parameter updates re-enter earlier states; run retries failures.
-    enum RadioState {
-        RESET_ASSERT,  //!< Drive the optional RST line HIGH (skip if unwired)
-        RESET_HOLD,    //!< Hold RST HIGH for RESET_HOLD_TICKS, then drive LOW
-        RESET_SETTLE,  //!< Wait RESET_SETTLE_TICKS after releasing RST
-        DETECT,        //!< Looking for RegVersion on SPI
-        CONFIGURE,     //!< Writing profile + entering RX
-        READY          //!< Polling RX / accepting TX
-    };
-
     //! RST must be held HIGH at least 100 us (datasheet section 7.2.2); one
     //! 1 kHz tick provides 1 ms with margin.
     static constexpr U32 RESET_HOLD_TICKS = 1;
     //! The radio needs 5 ms after RST release before use (datasheet 7.2.2).
     static constexpr U32 RESET_SETTLE_TICKS = 6;
-
-    //! Non-blocking downlink sequence. No state performs an airtime wait: the
-    //! 1 kHz scheduler advances the sequence with bounded SPI transactions.
-    enum TxState {
-        TX_IDLE,
-        TX_REQUEST_STANDBY,
-        TX_WAIT_STANDBY,
-        TX_CLEAR_FIFO,
-        TX_WRITE_LENGTH,
-        TX_LOAD_INITIAL,
-        TX_ENABLE_BOOST,
-        TX_REQUEST_MODE,
-        TX_WAIT_MODE,
-        TX_STREAM,
-        TX_REQUEST_RX,
-        TX_WAIT_RX,
-        TX_DISABLE_BOOST,
-        TX_ABORT_CLEAR_FIFO,
-        TX_ABORT_REQUEST_RX,
-        TX_ABORT_WAIT_RX,
-        TX_ABORT_DISABLE_BOOST
-    };
+    //! Register profile writes per CONFIGURE tick; bounds SPI work so the
+    //! full-profile rewrite never exceeds the 1 kHz scheduler budget.
+    static constexpr FwSizeType CONFIG_WRITES_PER_TICK = 4;
+    //! Staged modem profile entries: 33 register writes plus the FIFO flush.
+    static constexpr FwSizeType CONFIG_TABLE_SIZE = 34;
 
     enum TxProgress {
         TX_IN_PROGRESS,
         TX_SUCCEEDED,
         TX_FAILED
+    };
+
+    //! One staged register write of the modem profile.
+    struct RegisterWrite {
+        U8 address;
+        U8 value;
+    };
+
+    //! Bring-up sequencing (BringupMachine in Rfm69Manager.fpp). Actions and
+    //! guards delegate to the owning manager; ticks arrive under m_lock.
+    class BringupSm final : public BringupMachineStateMachineBase {
+      public:
+        explicit BringupSm(Rfm69Manager& manager);
+
+      private:
+        void action_doAssertReset(Signal signal) final;
+        void action_doHoldTick(Signal signal) final;
+        void action_doSettleTick(Signal signal) final;
+        void action_doDetect(Signal signal) final;
+        void action_doPrepareReset(Signal signal) final;
+        void action_doPrepareConfigure(Signal signal) final;
+        void action_doConfigureStep(Signal signal) final;
+        void action_doPollModeReady(Signal signal) final;
+        void action_doConfigureFailed(Signal signal) final;
+        void action_doAnnounceReady(Signal signal) final;
+
+        bool guard_resetLineHeld(Signal signal) const final;
+        bool guard_holdElapsed(Signal signal) const final;
+        bool guard_settleElapsed(Signal signal) const final;
+        bool guard_radioDetected(Signal signal) const final;
+        bool guard_profileWritten(Signal signal) const final;
+        bool guard_modeReady(Signal signal) const final;
+        bool guard_modeWaitFailed(Signal signal) const final;
+
+        Rfm69Manager& m_manager;
+    };
+
+    //! Downlink sequencing (TransmitMachine in Rfm69Manager.fpp). Actions and
+    //! guards delegate to the owning manager; signals arrive under m_lock.
+    class TransmitSm final : public TransmitMachineStateMachineBase {
+      public:
+        explicit TransmitSm(Rfm69Manager& manager);
+
+      private:
+        void action_doRequestStandby(Signal signal) final;
+        void action_doPollModeReady(Signal signal) final;
+        void action_doClearFifo(Signal signal) final;
+        void action_doWriteLength(Signal signal) final;
+        void action_doLoadInitial(Signal signal) final;
+        void action_doEnableBoost(Signal signal) final;
+        void action_doRequestTx(Signal signal) final;
+        void action_doStream(Signal signal) final;
+        void action_doRequestRx(Signal signal) final;
+        void action_doDisableBoost(Signal signal) final;
+        void action_doFinishSuccess(Signal signal) final;
+        void action_doBeginAbort(Signal signal) final;
+        void action_doAbortClearFifo(Signal signal) final;
+        void action_doAbortRequestRx(Signal signal) final;
+        void action_doPollAbortRx(Signal signal) final;
+        void action_doAbortDisableBoost(Signal signal) final;
+        void action_doFinishFailure(Signal signal) final;
+
+        bool guard_stepOk(Signal signal) const final;
+        bool guard_modeReady(Signal signal) const final;
+        bool guard_modeWaitFailed(Signal signal) const final;
+        bool guard_packetSent(Signal signal) const final;
+        bool guard_abortRxDone(Signal signal) const final;
+
+        Rfm69Manager& m_manager;
     };
 
     // ----------------------------------------------------------------------
@@ -146,8 +188,23 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     // Helper functions: radio state management (Rfm69Manager.cpp)
     // ----------------------------------------------------------------------
 
-    //! Advance detection/configuration toward READY
-    void initializeRadio();
+    //! True when bring-up has reached READY (RX polling / TX accepted)
+    bool radioReady() const;
+
+    //! True while a downlink buffer is owned by the transmit state machine
+    bool txActive() const;
+
+    //! Bring-up steps invoked by BringupMachine actions (one per run tick)
+    void bringupAssertReset();
+    void bringupHoldTick();
+    void bringupSettleTick();
+    void bringupDetect();
+    void bringupPrepareReset();
+    void bringupPrepareConfigure();
+    void bringupConfigureStep();
+    void bringupPollModeReady();
+    void bringupConfigureFailed();
+    void bringupAnnounceReady();
 
     //! Poll for and deliver received packets (budgeted per 1 kHz tick)
     void pollReceive();
@@ -167,12 +224,8 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Abort an in-progress drain and re-arm the receiver
     void abortReceiveDrain();
 
-    //! Enter the tick-driven hardware reset sequence (or DETECT when the
-    //! optional RST line is unwired), clearing any in-progress RX drain.
-    void beginResetSequence();
-
-    //! Map the internal lifecycle state to telemetry and write the channel.
-    void reportRadioState();
+    //! Write the RadioState telemetry channel.
+    void reportRadioState(Rfm69RadioState state);
 
     //! Stage one native RF packet for scheduler-driven transmission.
     bool startTransmit(Fw::Buffer& data, const ComCfg::FrameContext& context);
@@ -188,11 +241,24 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Returns true when dropBuffer/dropContext must be returned after unlock.
     bool tryStartPendingTransmit(Fw::Buffer& dropBuffer, ComCfg::FrameContext& dropContext);
 
-    //! Advance the scheduler-driven transmit sequence by one bounded step.
-    TxProgress advanceTransmit();
-
-    //! Enter bounded abort recovery after a transmit SPI/timeout failure.
-    void abortTransmit();
+    //! Transmit steps invoked by TransmitMachine actions (one per run tick)
+    void txRequestStandby();
+    void txPollModeReady();
+    void txClearFifo();
+    void txWriteLength();
+    void txLoadInitial();
+    void txEnableBoost();
+    void txRequestTx();
+    void txStream();
+    void txRequestRx();
+    void txDisableBoost();
+    void txFinishSuccess();
+    void txBeginAbort();
+    void txAbortClearFifo();
+    void txAbortRequestRx();
+    void txPollAbortRx();
+    void txAbortDisableBoost();
+    void txFinishFailure();
 
     // ----------------------------------------------------------------------
     // Helper functions: RFM69 register access (Rfm69Helpers.cpp)
@@ -211,8 +277,8 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! \brief Detect the radio by checking the version register
     bool detectRadio();
 
-    //! \brief Apply the packet-mode configuration to the radio
-    bool configureRadio();
+    //! \brief Stage the packet-mode register profile into m_configTable
+    bool buildConfigTable();
 
     //! \brief Command an operating mode and await ModeReady
     bool setMode(U8 mode  //!< Mode field value (Rfm69::Mode)
@@ -263,9 +329,9 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! share the SPI scratch buffers
     Os::Mutex m_lock;
 
-    //! True while a downlink buffer is owned by the scheduler-driven TX state machine.
-    bool m_txActive;
-    TxState m_txState;                //!< Current step of the staged TX sequence
+    BringupSm m_bringupSm;   //!< Bring-up state machine (BringupMachine)
+    TransmitSm m_txSm;       //!< Downlink state machine (TransmitMachine)
+
     Fw::Buffer m_txBuffer;            //!< Downlink buffer owned by the TX machine
     ComCfg::FrameContext m_txContext; //!< Frame context returned with m_txBuffer
     FwSizeType m_txOffset;            //!< Payload bytes already streamed to the FIFO
@@ -273,6 +339,12 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     U32 m_txElapsedTicks;             //!< Total ticks since TX start (overall bound)
     U32 m_txTimeoutTicks;             //!< Bitrate-derived bound on m_txElapsedTicks
     bool m_txBoostEnabled;            //!< +20 dBm boost registers currently active
+    bool m_txStepOk;                  //!< Last TX step's SPI transactions succeeded
+    bool m_txModeReady;               //!< ModeReady observed by the last TX poll
+    bool m_txModeWaitFailed;          //!< TX ModeReady wait failed or timed out
+    bool m_txPacketSent;              //!< Payload streamed and PacketSent observed
+    bool m_txAbortRxDone;             //!< Abort-path RX wait finished
+    TxProgress m_txResult;            //!< Outcome of the last TX tick
 
     //! Local hold used when comStatusOut is unwired (no ComQueue). Mirrors the
     //! Arduino RadioHead ground-station usbHold/retry behavior for half-duplex.
@@ -313,8 +385,19 @@ class Rfm69Manager final : public Rfm69ManagerComponentBase {
     //! Consecutive ticks a pending downlink has been blocked by the RX lease
     U32 m_txStarvedTicks;
 
-    RadioState m_state;        //!< Radio management state
     U32 m_resetTicks;          //!< Ticks elapsed in the current reset phase
+    bool m_resetLineHeld;      //!< RST is asserted (GPIO wired, write succeeded)
+    bool m_holdElapsed;        //!< RST hold window elapsed and line released
+    bool m_settleElapsed;      //!< Post-release settle window elapsed
+    bool m_radioDetected;      //!< RegVersion matched on the last DETECT tick
+    //! Staged modem profile written CONFIG_WRITES_PER_TICK entries per tick
+    RegisterWrite m_configTable[CONFIG_TABLE_SIZE];
+    FwSizeType m_configCount;  //!< Staged entries (0 = table must be rebuilt)
+    FwSizeType m_configIndex;  //!< Next staged entry to write
+    bool m_configRxRequested;  //!< RX mode requested after the profile write
+    U32 m_bringupWaitTicks;    //!< Ticks spent in the bring-up ModeReady wait
+    bool m_bringupModeReady;   //!< ModeReady observed by the last bring-up poll
+    bool m_bringupWaitFailed;  //!< Bring-up ModeReady wait failed or timed out
     bool m_configured;         //!< FPP parameters have been loaded
     U32 m_packetsTransmitted;  //!< Count of transmitted packets
     U32 m_packetsReceived;     //!< Count of received packets

@@ -6,7 +6,8 @@ because the chip FIFO is only 66 bytes).
 
 | File | Role |
 | --- | --- |
-| `Rfm69Manager.cpp` | Ports, commands, params, `DETECT`/`CONFIGURE`/`READY`, buffer ownership |
+| `Rfm69Manager.fpp` | Model, plus `BringupMachine`/`TransmitMachine` FPP state machines |
+| `Rfm69Manager.cpp` | Ports, commands, params, state-machine glue, buffer ownership |
 | `Rfm69Helpers.cpp` | SPI registers, TX/RX FIFO streaming, PA boost |
 | `Rfm69Radio.hpp` | Register map, modem enum→register maps, fixed packet profile |
 
@@ -35,11 +36,15 @@ FSK, 25 kHz deviation, sync `2D A7…`, `PacketConfig1=0xD0`). Maps live in
 
 ## Behavior
 
-- Lifecycle: `DETECT` → `CONFIGURE` → `READY` during `parametersLoaded` (before rate
-  groups). An optional hardware RST pulse is attempted once when a reset GPIO is
+- Lifecycle (`BringupMachine`): `RESET` → `DETECT` → `CONFIGURE` → `WAIT_MODE_READY`
+  → `READY`, advanced one bounded step per `run` tick so the 1 kHz rate group never
+  absorbs the full register profile or an RX ModeReady wait in one tick (`CONFIGURE`
+  writes `CONFIG_WRITES_PER_TICK` registers per tick; `WAIT_MODE_READY` polls once
+  per tick). An optional hardware RST pulse is attempted once when a reset GPIO is
   connected (recommended after power-up); bring-up continues even if the pulse is
   skipped or fails. `run` polls RX when `READY` and retries init after `RESET`/param
-  changes. While downlink TX holds the bus, `run` skips the tick (try-lock) so a
+  changes. Downlink is sequenced by the `TransmitMachine` FPP state machine, also
+  one bounded step per tick. While downlink TX holds the bus, `run` skips the tick (try-lock) so a
   1 kHz rate group is not stalled for RF airtime. While a packet is open, each
   tick drains at most one FifoLevel watermark (or the PayloadReady CRC-pass
   tail) so SyncAddressMatch is not cleared by emptying the FIFO early. Sync+FIFO
