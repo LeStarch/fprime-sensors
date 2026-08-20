@@ -15,6 +15,8 @@ register_fprime_module(
         "${CMAKE_CURRENT_LIST_DIR}/XBeeManager.fpp"
     SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/XBeeManager.cpp"
+    DEPENDS
+        Utils_Types
 )
 
 register_fprime_ut(
