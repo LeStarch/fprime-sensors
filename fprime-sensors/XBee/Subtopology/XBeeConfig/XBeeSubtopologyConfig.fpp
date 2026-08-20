@@ -16,7 +16,7 @@ module XBee {
             // Uplink is configured for receive so a socket task is started
             if (XBee::comDriver.open(state.xbee.device, static_cast<Drv::LinuxUartDriver::UartBaudRate>(state.xbee.baud),
                             Drv::LinuxUartDriver::NO_FLOW, Drv::LinuxUartDriver::PARITY_NONE, 1024)) {
-                XBee::comDriver.start(100, XBee::Components::FppConstant_STACK_SIZE::STACK_SIZE);
+                XBee::comDriver.start(100, XBee::Components::STACK_SIZE);
             } else {
                 Fw::Logger::log("[ERROR] Failed to open UART device %s at baud rate %" PRIu32 "\n", state.xbee.device, state.xbee.baud);
             }
@@ -34,7 +34,7 @@ module XBee {
         ConfigObjects::XBee_bufferManager::bins.bins[0].bufferSize = 2048;
         ConfigObjects::XBee_bufferManager::bins.bins[0].numBuffers = 5;
         XBee::bufferManager.setup(
-            XBee::FppConstant_buffMgrId::buffMgrId,
+            XBee::buffMgrId,
             0,
             XBee::Allocation::memAllocator,
             ConfigObjects::XBee_bufferManager::bins
