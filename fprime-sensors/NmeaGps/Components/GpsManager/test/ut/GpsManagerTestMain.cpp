@@ -26,8 +26,8 @@ namespace NmeaGps {
         ASSERT_TLM_Reading_SIZE(1);
 
         const GpsData& sent = this->tlmHistory_Reading->at(0).arg;
-        EXPECT_DOUBLE_EQ(GOOD_LATITUDE, sent.getlatitude());
-        EXPECT_DOUBLE_EQ(GOOD_LONGITUDE, sent.getlongitude());
+        EXPECT_DOUBLE_EQ(GOOD_LATITUDE, sent.get_latitude());
+        EXPECT_DOUBLE_EQ(GOOD_LONGITUDE, sent.get_longitude());
         ASSERT_from_dataReturnOut_SIZE(1);
         ASSERT_EQ(data.getData(), this->fromPortHistory_dataReturnOut->at(0).fwBuffer.getData());
     }
@@ -41,8 +41,8 @@ namespace NmeaGps {
         ASSERT_TLM_Reading_SIZE(1);
 
         const GpsData& sent = this->tlmHistory_Reading->at(0).arg;
-        EXPECT_DOUBLE_EQ(GOOD_LATITUDE, sent.getlatitude());
-        EXPECT_DOUBLE_EQ(GOOD_LONGITUDE, sent.getlongitude());
+        EXPECT_DOUBLE_EQ(GOOD_LATITUDE, sent.get_latitude());
+        EXPECT_DOUBLE_EQ(GOOD_LONGITUDE, sent.get_longitude());
         ASSERT_from_dataReturnOut_SIZE(1);
         ASSERT_EQ(data.getData(), this->fromPortHistory_dataReturnOut->at(0).fwBuffer.getData());
     }
