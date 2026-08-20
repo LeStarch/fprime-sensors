@@ -98,9 +98,7 @@ void XBeeManagerTester ::test_retry() {
     ComCfg::FrameContext context;
 
     for (U32 i = 0; i < RETRIES; i++) {
-        buffers[i].setData(storage[i]);
-        buffers[i].setSize(sizeof(storage[i]));
-        buffers[i].setContext(i);
+        buffers[i].set(storage[i], sizeof(storage[i]), i);
         this->fill_buffer(buffers[i]);
         invoke_to_dataIn(0, buffers[i], context);
         ASSERT_from_drvSendOut_SIZE((i + 1) * RETRIES);
