@@ -28,7 +28,9 @@ XBeeManagerTester ::XBeeManagerTester()
     this->connectPorts();
 }
 
-XBeeManagerTester ::~XBeeManagerTester() {}
+XBeeManagerTester ::~XBeeManagerTester() {
+    this->component.deinit();
+}
 
 // ----------------------------------------------------------------------
 // Helpers
