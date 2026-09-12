@@ -158,6 +158,9 @@ class Rfm69ManagerTester : public Rfm69ManagerGTestBase {
     // Helpers
     // ----------------------------------------------------------------------
 
+    //! Ticks for a chunked reconfigure (profile writes + RX ModeReady wait)
+    static constexpr U32 RECONFIGURE_TICKS = 25;
+
     //! Bring the component to the READY state
     void makeReady();
 

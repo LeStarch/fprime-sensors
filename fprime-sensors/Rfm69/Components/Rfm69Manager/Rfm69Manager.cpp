@@ -18,8 +18,8 @@ namespace Rfm69 {
 
 Rfm69Manager ::Rfm69Manager(const char* const compName)
     : Rfm69ManagerComponentBase(compName),
-      m_txActive(false),
-      m_txState(TX_IDLE),
+      m_bringupSm(*this),
+      m_txSm(*this),
       m_txBuffer(),
       m_txContext(),
       m_txOffset(0),
@@ -27,6 +27,12 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_txElapsedTicks(0),
       m_txTimeoutTicks(250),
       m_txBoostEnabled(false),
+      m_txStepOk(false),
+      m_txModeReady(false),
+      m_txModeWaitFailed(false),
+      m_txPacketSent(false),
+      m_txAbortRxDone(false),
+      m_txResult(TX_IN_PROGRESS),
       m_pendingTxBuffers{},
       m_pendingTxContexts{},
       m_pendingTxCount(0),
@@ -43,8 +49,18 @@ Rfm69Manager ::Rfm69Manager(const char* const compName)
       m_rxTxHoldoffTicks(0),
       m_txTxHoldoffTicks(0),
       m_txStarvedTicks(0),
-      m_state(RESET_ASSERT),
       m_resetTicks(0),
+      m_resetLineHeld(false),
+      m_holdElapsed(false),
+      m_settleElapsed(false),
+      m_radioDetected(false),
+      m_configTable{},
+      m_configCount(0),
+      m_configIndex(0),
+      m_configRxRequested(false),
+      m_bringupWaitTicks(0),
+      m_bringupModeReady(false),
+      m_bringupWaitFailed(false),
       m_configured(false),
       m_packetsTransmitted(0),
       m_packetsReceived(0),
@@ -62,9 +78,9 @@ void Rfm69Manager ::parameterUpdated(FwPrmIdType id) {
     // tick (LoRa re-reads params on each enableTx/enableRx instead).
     (void)id;
     Os::ScopeLock lock(this->m_lock);
-    if (this->m_state == READY) {
-        this->m_state = CONFIGURE;
-    }
+    // Only the READY state handles reconfigure; mid-bring-up updates are
+    // picked up when CONFIGURE rebuilds the staged profile anyway.
+    this->m_bringupSm.sendSignal_reconfigure();
 }
 
 void Rfm69Manager ::parametersLoaded() {
@@ -94,7 +110,7 @@ void Rfm69Manager ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const 
             } else {
                 this->m_comResumeNeeded = true;
             }
-        } else if ((this->m_state != READY) || this->m_txActive || this->channelBusy() ||
+        } else if (!this->radioReady() || this->txActive() || this->channelBusy() ||
                    (this->usesLocalTxHold() && (this->m_txTxHoldoffTicks > 0))) {
             // Half-duplex / not ready: ComQueue gets FAILURE; GS holds & retries.
             // GS ignores RX_TX_HOLDOFF (continuous TM would starve uplink) but
@@ -145,15 +161,15 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     FwSizeType rxPacketSize = 0;
     {
     Os::ScopeLock lock(this->m_lock);
-    if (this->m_txActive) {
-        txProgress = this->advanceTransmit();
+    if (this->txActive()) {
+        this->m_txResult = TX_IN_PROGRESS;
+        this->m_txSm.sendSignal_tick();
+        txProgress = this->m_txResult;
         if (txProgress != TX_IN_PROGRESS) {
             txCompleted = true;
             completedBuffer = this->m_txBuffer;
             completedContext = this->m_txContext;
             this->m_txBuffer = Fw::Buffer();
-            this->m_txState = TX_IDLE;
-            this->m_txActive = false;
             if (txProgress == TX_SUCCEEDED) {
                 // Do not immediately re-enter dataIn through the synchronous
                 // Com SUCCESS callback. Give the peer time to empty its FIFO,
@@ -164,10 +180,10 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
                 this->m_comResumeNeeded = true;
             }
         }
-    } else if (this->m_state == READY) {
+    } else if (this->radioReady()) {
         // Drain local GS hold before RX poll so uplink is not starved by TM.
         dropPending = this->tryStartPendingTransmit(dropBuffer, dropContext);
-        if (!this->m_txActive) {
+        if (!this->txActive()) {
             const U32 pollDivisor = this->m_rxDraining ? this->m_rxActivePollDivisor : this->m_rxIdlePollDivisor;
             this->m_rxPollTicks++;
             if (this->m_rxPollTicks >= pollDivisor) {
@@ -175,10 +191,11 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
                 this->pollReceive();
             }
         }
-    } else {
+    } else if (this->m_configured) {
         // Bring-up advances here one bounded step per tick; also covers
-        // RESET, parameter reconfigure, and failed-detect retries.
-        this->initializeRadio();
+        // RESET, parameter reconfigure, and failed-detect retries. Do not
+        // touch the bus before the deployment has loaded its parameters.
+        this->m_bringupSm.sendSignal_tick();
     }
     if (this->m_rxTxHoldoffTicks > 0) {
         this->m_rxTxHoldoffTicks--;
@@ -189,7 +206,7 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
     // Downlink fairness: each received packet re-arms the RX lease, so
     // periodic uplink (GDS keepalives, paced file chunks) can otherwise defer
     // a pending downlink forever. Bound the total wait and drop the lease.
-    if (this->m_comResumeNeeded && (this->m_state == READY) &&
+    if (this->m_comResumeNeeded && this->radioReady() &&
         (this->m_transmitEnabled == TransmitState::ENABLED) && (this->m_rxTxHoldoffTicks > 0)) {
         if (++this->m_txStarvedTicks >= RX_HOLDOFF_STARVATION_TICKS) {
             this->m_txStarvedTicks = 0;
@@ -199,7 +216,7 @@ void Rfm69Manager ::run_handler(FwIndexType portNum, U32 context) {
         this->m_txStarvedTicks = 0;
     }
     // After holdoff decays, try a held GS uplink before emitting Com SUCCESS.
-    if (!dropPending && !this->m_txActive && (this->m_state == READY)) {
+    if (!dropPending && !this->txActive() && this->radioReady()) {
         dropPending = this->tryStartPendingTransmit(dropBuffer, dropContext);
     }
     // Resume ComQueue after holdoff/TX FAILURE once the radio can accept TX.
@@ -243,7 +260,7 @@ bool Rfm69Manager ::maybeResumeComStatus() {
     if (this->m_transmitEnabled != TransmitState::ENABLED) {
         return false;
     }
-    if (this->m_state != READY || this->downlinkBlocked()) {
+    if (!this->radioReady() || this->downlinkBlocked()) {
         return false;
     }
     this->m_comResumeNeeded = false;
@@ -254,104 +271,134 @@ bool Rfm69Manager ::maybeResumeComStatus() {
 // Helper functions: radio state management
 // ----------------------------------------------------------------------
 
-void Rfm69Manager ::initializeRadio() {
-    // Do not touch the bus before the deployment has loaded its parameters.
-    if (!this->m_configured) {
-        return;
-    }
-    switch (this->m_state) {
-        case RESET_ASSERT:
-            // Optional hardware RST (recommended when a reset GPIO is wired —
-            // cold power-up / shared-SPI glitches can leave the HCW in a bad
-            // state). Never required: skip if unconnected or the write fails.
-            if (this->isConnected_resetGpio_OutputPort(0) &&
-                (this->resetGpio_out(0, Fw::Logic::HIGH) == Drv::GpioStatus::OP_OK)) {
-                this->m_resetTicks = 0;
-                this->m_state = RESET_HOLD;
-            } else {
-                this->m_state = DETECT;
-            }
-            this->reportRadioState();
-            break;
-        case RESET_HOLD:
-            if (++this->m_resetTicks >= RESET_HOLD_TICKS) {
-                // Retry the release next tick on failure: advancing with RST
-                // still asserted would leave the radio in reset and mask the
-                // GPIO fault as a generic detection failure.
-                if (this->resetGpio_out(0, Fw::Logic::LOW) == Drv::GpioStatus::OP_OK) {
-                    this->m_resetTicks = 0;
-                    this->m_state = RESET_SETTLE;
-                }
-            }
-            break;
-        case RESET_SETTLE:
-            if (++this->m_resetTicks >= RESET_SETTLE_TICKS) {
-                this->m_state = DETECT;
-                this->reportRadioState();
-            }
-            break;
-        case DETECT:
-            if (this->detectRadio()) {
-                this->m_state = CONFIGURE;
-                this->reportRadioState();
-            } else {
-                this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
-            }
-            break;
-        case CONFIGURE:
-            if (this->configureRadio() && this->setMode(Mode::RX)) {
-                this->m_state = READY;
-                this->reportRadioState();
-                this->log_ACTIVITY_HI_RadioReady();
-                // Com status is a one-time startup handshake. Sending an extra
-                // SUCCESS after a hardware reset is invalid while the downstream
-                // aggregator is already READY and causes it to assert.
-                if (!this->m_comStatusAnnounced && this->isConnected_comStatusOut_OutputPort(0)) {
-                    Fw::Success ready = Fw::Success::SUCCESS;
-                    this->comStatusOut_out(0, ready);
-                    this->m_comStatusAnnounced = true;
-                }
-            } else {
-                this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
-            }
-            break;
-        case READY:
-        default:
-            break;
+bool Rfm69Manager ::radioReady() const {
+    return this->m_bringupSm.getState() == BringupMachine_State::BRINGUP_READY;
+}
+
+bool Rfm69Manager ::txActive() const {
+    return this->m_txSm.getState() != TransmitMachine_State::IDLE;
+}
+
+void Rfm69Manager ::bringupAssertReset() {
+    // Optional hardware RST (recommended when a reset GPIO is wired —
+    // cold power-up / shared-SPI glitches can leave the HCW in a bad
+    // state). Never required: skip if unconnected or the write fails.
+    this->m_resetLineHeld = this->isConnected_resetGpio_OutputPort(0) &&
+                            (this->resetGpio_out(0, Fw::Logic::HIGH) == Drv::GpioStatus::OP_OK);
+    if (this->m_resetLineHeld) {
+        this->m_resetTicks = 0;
+        this->reportRadioState(Rfm69RadioState::RESETTING);
+    } else {
+        this->reportRadioState(Rfm69RadioState::DETECT);
     }
 }
 
-void Rfm69Manager ::beginResetSequence() {
-    this->m_state = RESET_ASSERT;
+void Rfm69Manager ::bringupHoldTick() {
+    this->m_holdElapsed = false;
+    if (++this->m_resetTicks >= RESET_HOLD_TICKS) {
+        // Retry the release next tick on failure: advancing with RST
+        // still asserted would leave the radio in reset and mask the
+        // GPIO fault as a generic detection failure.
+        if (this->resetGpio_out(0, Fw::Logic::LOW) == Drv::GpioStatus::OP_OK) {
+            this->m_resetTicks = 0;
+            this->m_holdElapsed = true;
+        }
+    }
+}
+
+void Rfm69Manager ::bringupSettleTick() {
+    this->m_settleElapsed = (++this->m_resetTicks >= RESET_SETTLE_TICKS);
+    if (this->m_settleElapsed) {
+        this->reportRadioState(Rfm69RadioState::DETECT);
+    }
+}
+
+void Rfm69Manager ::bringupDetect() {
+    this->m_radioDetected = this->detectRadio();
+    if (this->m_radioDetected) {
+        this->reportRadioState(Rfm69RadioState::CONFIGURE);
+    } else {
+        this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
+    }
+}
+
+void Rfm69Manager ::bringupPrepareReset() {
     this->m_resetTicks = 0;
     this->m_rxDraining = false;
     this->m_rxLength = 0;
     this->m_rxReceived = 0;
     this->m_rxPollTicks = 0;
     this->m_rxStaleSyncTicks = 0;
-    this->reportRadioState();
+    this->reportRadioState(Rfm69RadioState::RESETTING);
 }
 
-void Rfm69Manager ::reportRadioState() {
-    Rfm69RadioState state = Rfm69RadioState::NOT_STARTED;
-    switch (this->m_state) {
-        case RESET_ASSERT:
-        case RESET_HOLD:
-        case RESET_SETTLE:
-            state = Rfm69RadioState::RESETTING;
-            break;
-        case DETECT:
-            state = Rfm69RadioState::DETECT;
-            break;
-        case CONFIGURE:
-            state = Rfm69RadioState::CONFIGURE;
-            break;
-        case READY:
-            state = Rfm69RadioState::READY;
-            break;
-        default:
-            break;
+void Rfm69Manager ::bringupPrepareConfigure() {
+    this->m_configCount = 0;
+    this->m_configIndex = 0;
+    this->m_configRxRequested = false;
+}
+
+void Rfm69Manager ::bringupConfigureStep() {
+    // One bounded chunk per tick: build the staged profile, write up to
+    // CONFIG_WRITES_PER_TICK entries, then request RX. Any failure restarts
+    // the profile write from the top on the next tick.
+    if (this->m_configCount == 0) {
+        if (!this->buildConfigTable()) {
+            this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
+            return;
+        }
     }
+    if (this->m_configIndex < this->m_configCount) {
+        const FwSizeType end = FW_MIN(this->m_configIndex + CONFIG_WRITES_PER_TICK, this->m_configCount);
+        for (; this->m_configIndex < end; this->m_configIndex++) {
+            const RegisterWrite& entry = this->m_configTable[this->m_configIndex];
+            if (this->writeRegister(entry.address, entry.value) != Drv::SpiStatus::SPI_OK) {
+                this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
+                this->bringupPrepareConfigure();
+                return;
+            }
+        }
+    } else if (this->requestMode(Mode::RX)) {
+        this->m_configRxRequested = true;
+        this->m_bringupWaitTicks = 0;
+        this->m_bringupModeReady = false;
+        this->m_bringupWaitFailed = false;
+    } else {
+        this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
+        this->bringupPrepareConfigure();
+    }
+}
+
+void Rfm69Manager ::bringupPollModeReady() {
+    U8 flags = 0;
+    if (this->readRegister(Reg::IRQ_FLAGS_1, flags) != Drv::SpiStatus::SPI_OK) {
+        this->m_bringupWaitFailed = true;
+    } else if ((flags & IrqFlags1::MODE_READY) != 0) {
+        this->m_bringupModeReady = true;
+    } else if (++this->m_bringupWaitTicks >= MODE_READY_TIMEOUT_TICKS) {
+        this->m_bringupWaitFailed = true;
+    }
+}
+
+void Rfm69Manager ::bringupConfigureFailed() {
+    this->log_WARNING_HI_ConfigurationFailed(Rfm69Mode::Receive);
+    this->bringupPrepareConfigure();
+}
+
+void Rfm69Manager ::bringupAnnounceReady() {
+    this->reportRadioState(Rfm69RadioState::READY);
+    this->log_ACTIVITY_HI_RadioReady();
+    // Com status is a one-time startup handshake. Sending an extra
+    // SUCCESS after a hardware reset is invalid while the downstream
+    // aggregator is already READY and causes it to assert.
+    if (!this->m_comStatusAnnounced && this->isConnected_comStatusOut_OutputPort(0)) {
+        Fw::Success ready = Fw::Success::SUCCESS;
+        this->comStatusOut_out(0, ready);
+        this->m_comStatusAnnounced = true;
+    }
+}
+
+void Rfm69Manager ::reportRadioState(Rfm69RadioState state) {
     this->tlmWrite_RadioState(state);
 }
 
@@ -368,8 +415,7 @@ bool Rfm69Manager ::startTransmit(Fw::Buffer& data, const ComCfg::FrameContext& 
     this->m_txWaitTicks = 0;
     this->m_txElapsedTicks = 0;
     this->m_txBoostEnabled = false;
-    this->m_txState = TX_REQUEST_STANDBY;
-    this->m_txActive = true;
+    this->m_txSm.sendSignal_start();
     return true;
 }
 
@@ -391,7 +437,7 @@ bool Rfm69Manager ::enqueuePendingTransmit(Fw::Buffer& data, const ComCfg::Frame
 }
 
 bool Rfm69Manager ::tryStartPendingTransmit(Fw::Buffer& dropBuffer, ComCfg::FrameContext& dropContext) {
-    if ((this->m_pendingTxCount == 0) || this->m_txActive) {
+    if ((this->m_pendingTxCount == 0) || this->txActive()) {
         return false;
     }
     if (this->m_transmitEnabled != TransmitState::ENABLED) {
@@ -400,7 +446,7 @@ bool Rfm69Manager ::tryStartPendingTransmit(Fw::Buffer& dropBuffer, ComCfg::Fram
     // Pace pending GS uplinks with the post-TX quiet window. RX holdoff is
     // ignored here so continuous TM cannot pin the pending queue. TX holdoff
     // is required so a UART burst cannot drain back-to-back.
-    if ((this->m_state != READY) || this->channelBusy() || (this->m_txTxHoldoffTicks > 0)) {
+    if (!this->radioReady() || this->channelBusy() || (this->m_txTxHoldoffTicks > 0)) {
         return false;
     }
     Fw::Buffer data = this->m_pendingTxBuffers[0];
@@ -453,19 +499,18 @@ void Rfm69Manager ::RESET_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
         Os::ScopeLock lock(this->m_lock);
         // Fail an in-flight TX immediately: the radio is about to be held in
         // hardware reset, so further TX SPI traffic is pointless.
-        abortPending = this->m_txActive;
+        abortPending = this->txActive();
         if (abortPending) {
             abortBuffer = this->m_txBuffer;
             abortContext = this->m_txContext;
             this->m_txBuffer = Fw::Buffer();
-            this->m_txState = TX_IDLE;
-            this->m_txActive = false;
+            this->m_txSm.sendSignal_cancel();
             this->m_txBoostEnabled = false;
             this->m_comResumeNeeded = true;
         }
         // Tick-driven: the optional RST pulse and re-detect are advanced one
         // bounded step per run() tick, so no command-context blocking occurs.
-        this->beginResetSequence();
+        this->m_bringupSm.sendSignal_reset();
     }
     if (abortPending) {
         this->dataReturnOut_out(0, abortBuffer, abortContext);
@@ -641,6 +686,217 @@ void Rfm69Manager ::deliverReceivedPacket(const U8* data, FwSizeType size) {
     buffer.setSize(size);
     ComCfg::FrameContext context;
     this->dataOut_out(0, buffer, context);
+}
+
+// ----------------------------------------------------------------------
+// BringupMachine glue: actions and guards delegate to the manager
+// ----------------------------------------------------------------------
+
+Rfm69Manager::BringupSm ::BringupSm(Rfm69Manager& manager) : m_manager(manager) {
+    this->initBase(0);
+}
+
+void Rfm69Manager::BringupSm ::action_doAssertReset(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupAssertReset();
+}
+
+void Rfm69Manager::BringupSm ::action_doHoldTick(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupHoldTick();
+}
+
+void Rfm69Manager::BringupSm ::action_doSettleTick(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupSettleTick();
+}
+
+void Rfm69Manager::BringupSm ::action_doDetect(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupDetect();
+}
+
+void Rfm69Manager::BringupSm ::action_doPrepareReset(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupPrepareReset();
+}
+
+void Rfm69Manager::BringupSm ::action_doPrepareConfigure(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupPrepareConfigure();
+}
+
+void Rfm69Manager::BringupSm ::action_doConfigureStep(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupConfigureStep();
+}
+
+void Rfm69Manager::BringupSm ::action_doPollModeReady(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupPollModeReady();
+}
+
+void Rfm69Manager::BringupSm ::action_doConfigureFailed(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupConfigureFailed();
+}
+
+void Rfm69Manager::BringupSm ::action_doAnnounceReady(Signal signal) {
+    (void)signal;
+    this->m_manager.bringupAnnounceReady();
+}
+
+bool Rfm69Manager::BringupSm ::guard_resetLineHeld(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_resetLineHeld;
+}
+
+bool Rfm69Manager::BringupSm ::guard_holdElapsed(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_holdElapsed;
+}
+
+bool Rfm69Manager::BringupSm ::guard_settleElapsed(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_settleElapsed;
+}
+
+bool Rfm69Manager::BringupSm ::guard_radioDetected(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_radioDetected;
+}
+
+bool Rfm69Manager::BringupSm ::guard_profileWritten(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_configRxRequested;
+}
+
+bool Rfm69Manager::BringupSm ::guard_modeReady(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_bringupModeReady;
+}
+
+bool Rfm69Manager::BringupSm ::guard_modeWaitFailed(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_bringupWaitFailed;
+}
+
+// ----------------------------------------------------------------------
+// TransmitMachine glue: actions and guards delegate to the manager
+// ----------------------------------------------------------------------
+
+Rfm69Manager::TransmitSm ::TransmitSm(Rfm69Manager& manager) : m_manager(manager) {
+    this->initBase(1);
+}
+
+void Rfm69Manager::TransmitSm ::action_doRequestStandby(Signal signal) {
+    (void)signal;
+    this->m_manager.txRequestStandby();
+}
+
+void Rfm69Manager::TransmitSm ::action_doPollModeReady(Signal signal) {
+    (void)signal;
+    this->m_manager.txPollModeReady();
+}
+
+void Rfm69Manager::TransmitSm ::action_doClearFifo(Signal signal) {
+    (void)signal;
+    this->m_manager.txClearFifo();
+}
+
+void Rfm69Manager::TransmitSm ::action_doWriteLength(Signal signal) {
+    (void)signal;
+    this->m_manager.txWriteLength();
+}
+
+void Rfm69Manager::TransmitSm ::action_doLoadInitial(Signal signal) {
+    (void)signal;
+    this->m_manager.txLoadInitial();
+}
+
+void Rfm69Manager::TransmitSm ::action_doEnableBoost(Signal signal) {
+    (void)signal;
+    this->m_manager.txEnableBoost();
+}
+
+void Rfm69Manager::TransmitSm ::action_doRequestTx(Signal signal) {
+    (void)signal;
+    this->m_manager.txRequestTx();
+}
+
+void Rfm69Manager::TransmitSm ::action_doStream(Signal signal) {
+    (void)signal;
+    this->m_manager.txStream();
+}
+
+void Rfm69Manager::TransmitSm ::action_doRequestRx(Signal signal) {
+    (void)signal;
+    this->m_manager.txRequestRx();
+}
+
+void Rfm69Manager::TransmitSm ::action_doDisableBoost(Signal signal) {
+    (void)signal;
+    this->m_manager.txDisableBoost();
+}
+
+void Rfm69Manager::TransmitSm ::action_doFinishSuccess(Signal signal) {
+    (void)signal;
+    this->m_manager.txFinishSuccess();
+}
+
+void Rfm69Manager::TransmitSm ::action_doBeginAbort(Signal signal) {
+    (void)signal;
+    this->m_manager.txBeginAbort();
+}
+
+void Rfm69Manager::TransmitSm ::action_doAbortClearFifo(Signal signal) {
+    (void)signal;
+    this->m_manager.txAbortClearFifo();
+}
+
+void Rfm69Manager::TransmitSm ::action_doAbortRequestRx(Signal signal) {
+    (void)signal;
+    this->m_manager.txAbortRequestRx();
+}
+
+void Rfm69Manager::TransmitSm ::action_doPollAbortRx(Signal signal) {
+    (void)signal;
+    this->m_manager.txPollAbortRx();
+}
+
+void Rfm69Manager::TransmitSm ::action_doAbortDisableBoost(Signal signal) {
+    (void)signal;
+    this->m_manager.txAbortDisableBoost();
+}
+
+void Rfm69Manager::TransmitSm ::action_doFinishFailure(Signal signal) {
+    (void)signal;
+    this->m_manager.txFinishFailure();
+}
+
+bool Rfm69Manager::TransmitSm ::guard_stepOk(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_txStepOk;
+}
+
+bool Rfm69Manager::TransmitSm ::guard_modeReady(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_txModeReady;
+}
+
+bool Rfm69Manager::TransmitSm ::guard_modeWaitFailed(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_txModeWaitFailed;
+}
+
+bool Rfm69Manager::TransmitSm ::guard_packetSent(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_txPacketSent;
+}
+
+bool Rfm69Manager::TransmitSm ::guard_abortRxDone(Signal signal) const {
+    (void)signal;
+    return this->m_manager.m_txAbortRxDone;
 }
 
 }  // namespace Rfm69

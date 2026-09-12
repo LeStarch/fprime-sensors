@@ -440,7 +440,8 @@ void Rfm69ManagerTester ::test_high_power_boost_recovery() {
     this->paramSend_TX_POWER(0, 0);
     ASSERT_CMD_RESPONSE_SIZE(1);
     ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_TX_POWER_SET, 0, Fw::CmdResponse::OK);
-    this->invoke_to_run(0, 0);
+    // Reconfiguration is chunked across ticks (bounded SPI work per tick).
+    this->runTicks(RECONFIGURE_TICKS);
     ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::PA_LEVEL), 0x7F);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::OCP), Pa::OCP_NORMAL);
@@ -497,7 +498,8 @@ void Rfm69ManagerTester ::test_bandwidth_update_reconfigure() {
     ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_BANDWIDTH_RX_SET, 0, Fw::CmdResponse::OK);
     ASSERT_from_spiWriteRead_SIZE(0);
 
-    this->invoke_to_run(0, 0);
+    // Reconfiguration is chunked across ticks (bounded SPI work per tick).
+    this->runTicks(RECONFIGURE_TICKS);
     ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     ASSERT_from_comStatusOut_SIZE(0);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::RX_BW), 0xE9);
@@ -545,7 +547,8 @@ void Rfm69ManagerTester ::test_parameter_update_reconfigure() {
     ASSERT_CMD_RESPONSE(0, Rfm69ManagerComponentBase::OPCODE_DATA_RATE_SET, 0, Fw::CmdResponse::OK);
     ASSERT_from_spiWriteRead_SIZE(0);
 
-    this->invoke_to_run(0, 0);
+    // Reconfiguration is chunked across ticks (bounded SPI work per tick).
+    this->runTicks(RECONFIGURE_TICKS);
     ASSERT_EVENTS_ConfigurationFailed_SIZE(0);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_MSB), 0x06);
     ASSERT_EQ(this->m_model.readRegisterValue(Reg::BITRATE_LSB), 0x83);

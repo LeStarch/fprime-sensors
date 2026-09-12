@@ -229,7 +229,7 @@ constexpr PacketProfile NATIVE_PACKET_PROFILE = {
     4,
     {0x2D, 0xA7, 0x5C, 0x39, 0xD1, 0x6E, 0x84, 0xF2},
     0xD0,  // PacketFormat=variable, DcFree=whitening, CrcOn; AES/unlimited off
-    FIFO_THRESHOLD,  // configureRadio ORs TxStartCondition → RegFifoThresh=0xA0
+    FIFO_THRESHOLD,  // buildConfigTable ORs TxStartCondition → RegFifoThresh=0xA0
     0x02,  // AutoRxRestartOn
     0x30,
 };
